@@ -29,6 +29,7 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "blacklist_added": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}\n期限：{duration}",
     "blacklist_removed": "已将 {target_name}({target_id}) 移出黑名单",
     "blacklist_not_found": "{target_name}({target_id}) 不在黑名单中",
+    "blacklist_disabled": "黑名单功能已在插件配置中关闭",
     "blacklist_empty": "黑名单（{scope}）当前为空",
     "blacklist_header": "黑名单（{scope}）共 {count} 人，覆盖 {groups} 个群",
     "api_failed": "操作失败：{error}",

@@ -1408,6 +1408,13 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
+        if not self._blacklist_enabled:
+            # ``add`` cannot persist anything while the feature is off, so
+            # reporting success here would be a lie.
+            async for item in self._reply(event, self._text("blacklist_disabled")):
+                yield item
+            return
+
         parsed = parse_target_args(
             str(args or "").split(),
             extract_at_targets(event),
@@ -1821,6 +1828,9 @@ class QQAdminPlugin(Star):
             request: The join request.
             decision: The decision that was applied (or held).
         """
+        if not group_set.get("notice_enabled", True):
+            return
+
         action_label = {
             "approve": "已自动放行",
             "reject": "已自动拒绝",

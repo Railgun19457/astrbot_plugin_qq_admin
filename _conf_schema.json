@@ -5,12 +5,6 @@
     "hint": "关闭后所有指令与 LLM 工具都不会响应",
     "default": true
   },
-  "priority": {
-    "type": "int",
-    "description": "插件优先级",
-    "hint": "数值越大越先执行。默认值即可，如不确定请勿修改",
-    "default": 0
-  },
   "default_ban_duration": {
     "type": "string",
     "description": "默认禁言时长",
@@ -463,6 +457,12 @@
         "description": "黑名单为空",
         "hint": "可用占位符：{scope}",
         "default": "黑名单（{scope}）当前为空"
+      },
+      "blacklist_disabled": {
+        "type": "text",
+        "description": "黑名单功能已关闭",
+        "hint": "blacklist.enabled 为 false 时，拉黑指令与工具返回的提示",
+        "default": "黑名单功能已在插件配置中关闭"
       },
       "blacklist_header": {
         "type": "text",

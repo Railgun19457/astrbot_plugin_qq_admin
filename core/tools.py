@@ -635,6 +635,9 @@ class QqBlacklistAddTool(_PluginTool):
         if not allowed:
             return _denied(plugin, deny)
 
+        if not plugin._blacklist_enabled:
+            return "error: " + render_template(plugin.templates, "blacklist_disabled")
+
         target, error = await self.resolve_target(event, user_id)
         if error:
             return error

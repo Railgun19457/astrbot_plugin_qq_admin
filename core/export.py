@@ -10,6 +10,7 @@ first-class field collected from the command and the LLM tool.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -206,11 +207,15 @@ class Exporter:
             )
 
         covered = f"，覆盖 {len(group_ids)} 个群" if group_ids else ""
+        # The scope is a user chosen group set name, so it cannot be copied
+        # into a file name verbatim: separators would escape the output
+        # directory and characters such as ``:`` are invalid on Windows.
+        safe_scope = re.sub(r"[^\w.-]", "_", str(scope)).strip("._")[:60] or "scope"
         return self._write(
             sheet_title="黑名单",
             headers=headers,
             rows=data,
-            filename=f"blacklist-{scope}-{_timestamp()}.xlsx",
+            filename=f"blacklist-{safe_scope}-{_timestamp()}.xlsx",
             heading=f"黑名单 - {scope}",
             note=f"共 {len(entries)} 人{covered}",
         )
