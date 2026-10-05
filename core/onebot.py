@@ -81,30 +81,54 @@ class OneBotClient:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _routing(event: AstrMessageEvent | None) -> dict[str, Any]:
+    def _resolve_bot(source: Any) -> Any | None:
+        """Obtain the OneBot client from an event or a platform instance.
+
+        Most call sites pass a message event. Timers restored after a restart
+        have no event, so a platform instance is accepted as well.
+
+        Args:
+            source: An ``AstrMessageEvent`` or an aiocqhttp platform instance.
+
+        Returns:
+            The ``CQHttp`` client, or ``None`` when neither shape matched.
+        """
+        bot = getattr(source, "bot", None)
+        if bot is not None:
+            return bot
+        getter = getattr(source, "get_client", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:  # noqa: BLE001 - treated as "no client available"
+                return None
+        return None
+
+    @staticmethod
+    def _routing(source: Any) -> dict[str, Any]:
         """Build the routing kwargs required by multi-connection setups.
 
         Args:
-            event: Message event providing the bot's ``self_id``.
+            source: An ``AstrMessageEvent`` or a platform instance.
 
         Returns:
             Either an empty dict or ``{"self_id": ...}``.
         """
-        if event is None:
+        if source is None:
             return {}
-        self_id = getattr(getattr(event, "message_obj", None), "self_id", None)
+        self_id = getattr(getattr(source, "message_obj", None), "self_id", None)
         return {"self_id": self_id} if self_id else {}
 
     async def call_action(
         self,
-        event: AstrMessageEvent,
+        event: Any,
         action: str,
         **params: Any,
     ) -> ActionResult:
         """Invoke a raw OneBot action.
 
         Args:
-            event: Message event; supplies the ``bot`` instance and routing id.
+            event: Message event, or a platform instance for restored timers.
             action: OneBot action name.
             **params: Action parameters.
 
@@ -112,7 +136,7 @@ class OneBotClient:
             An :class:`ActionResult`. Failures are reported through
             ``ok=False`` rather than raised.
         """
-        bot = getattr(event, "bot", None)
+        bot = self._resolve_bot(event)
         if bot is None:
             return ActionResult(
                 ok=False,
@@ -185,14 +209,14 @@ class OneBotClient:
 
     async def set_group_whole_ban(
         self,
-        event: AstrMessageEvent,
+        event: Any,
         group_id: str,
         enabled: bool = True,
     ) -> ActionResult:
         """Toggle the "mute everyone" switch for a group.
 
         Args:
-            event: Message event.
+            event: Message event, or a platform instance for restored timers.
             group_id: Target group.
             enabled: ``True`` mutes everyone, ``False`` lifts it.
 

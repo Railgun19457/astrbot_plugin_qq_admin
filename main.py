@@ -11,6 +11,7 @@ the reusable pieces living under ``core/``.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
@@ -61,6 +62,7 @@ from .core.utils import (
     extract_reply_message_id,
     shorten,
 )
+from .core.wholeban import RESTORE_GRACE, WholeBanRecord, WholeBanStore
 
 #: Platform adapter this plugin is able to drive.
 SUPPORTED_PLATFORM = "aiocqhttp"
@@ -123,6 +125,105 @@ class QQAdminPlugin(Star):
             f"[QQAdmin] 已加载 | 群组 {len(self.group_sets)} 个 | "
             f"索引 {len(self.group_index)} 个群",
         )
+
+    @filter.on_platform_loaded()
+    async def restore_whole_ban_timers(self) -> None:
+        """Re-arm whole-group mute timers that were pending before the reload.
+
+        The deadlines are persisted, so a restart does not turn a timed mute
+        into a permanent one. Each restored group is verified against the
+        server first: the mute may have been lifted manually while the bot was
+        down, in which case only the stale record is dropped.
+        """
+        records = self.whole_ban.load_all()
+        if not records:
+            return
+
+        platform = self._find_onebot_platform()
+        if platform is None:
+            logger.warning(
+                f"[QQAdmin] 有 {len(records)} 个全群禁言待恢复，但未找到可用的 "
+                "aiocqhttp 平台实例，已保留记录待下次启动重试",
+            )
+            return
+
+        for record in records:
+            status = await self._probe_whole_ban(platform, record.group_id)
+            if status is False:
+                logger.info(
+                    f"[QQAdmin] 群 {record.group_id} 的全群禁言已不在生效，"
+                    "清理过期记录",
+                )
+                self.whole_ban.remove(record.group_id)
+                continue
+
+            if status is None:
+                # The protocol implementation does not report the mute state.
+                # Acting on a guess could lift a mute an operator set manually
+                # while the bot was down, so the record is kept for inspection
+                # instead of being trusted or deleted.
+                logger.warning(
+                    f"[QQAdmin] 无法确认群 {record.group_id} 的禁言状态"
+                    f"（原定 {format_duration(max(0, record.remaining))} 后解除），"
+                    "已保留 whole_ban.json 中的记录，请手动确认后处理",
+                )
+                continue
+
+            delay = max(RESTORE_GRACE, record.remaining)
+            self._arm_whole_ban_timer(platform, record.group_id, delay)
+            logger.info(
+                f"[QQAdmin] 已恢复群 {record.group_id} 的全群禁言定时，"
+                f"将在 {format_duration(delay)} 后解除",
+            )
+
+    def _find_onebot_platform(self) -> Any | None:
+        """Locate a live aiocqhttp platform instance.
+
+        Timers that survive a reload must be rescheduled without an event, so
+        the platform is resolved from the context instead.
+
+        Returns:
+            The platform instance, or ``None`` when unavailable.
+        """
+        manager = getattr(self.context, "platform_manager", None)
+        insts = getattr(manager, "platform_insts", None)
+        if insts is None:
+            getter = getattr(manager, "get_insts", None)
+            insts = getter() if callable(getter) else []
+        for inst in insts or []:
+            try:
+                if inst.meta().name == SUPPORTED_PLATFORM:
+                    return inst
+            except Exception:  # noqa: BLE001 - a foreign instance must not break us
+                continue
+        return None
+
+    async def _probe_whole_ban(
+        self,
+        platform: Any,
+        group_id: str,
+    ) -> bool | None:
+        """Ask the server whether a group is currently muted.
+
+        Args:
+            platform: Live aiocqhttp platform instance.
+            group_id: Group to check.
+
+        Returns:
+            ``True``/``False`` when the state could be read, ``None`` when the
+            protocol implementation does not expose the information.
+        """
+        try:
+            info = await platform.get_client().call_action(
+                "get_group_info",
+                group_id=int(group_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - verification is best effort
+            logger.debug(f"[QQAdmin] 校验群 {group_id} 禁言状态失败：{exc}")
+            return None
+        if not isinstance(info, dict) or "group_all_shut" not in info:
+            return None
+        return bool(info.get("group_all_shut"))
 
     # ------------------------------------------------------------------ #
     #  Startup helpers
@@ -256,6 +357,7 @@ class QQAdminPlugin(Star):
         )
         self.blacklist = BlacklistStore(data_dir, enabled=self._blacklist_enabled)
         self.pending_reviews = PendingReviewStore(data_dir)
+        self.whole_ban = WholeBanStore(data_dir)
         self.exporter = Exporter(
             data_dir / "exports",
             max_members=self._export_max_members,
@@ -465,40 +567,105 @@ class QQAdminPlugin(Star):
         event: AstrMessageEvent,
         group_id: str,
         duration: int,
+        *,
+        operator: str = "",
     ) -> None:
         """Schedule automatic removal of a whole-group mute.
 
         OneBot offers no timed variant of ``set_group_whole_ban``, so the
-        plugin has to lift it itself. The task is tracked so that
-        :meth:`terminate` can cancel it.
+        plugin has to lift it itself. The deadline is persisted before the
+        timer is armed, so a restart can re-arm it instead of leaving the group
+        muted forever (see :meth:`restore_whole_ban_timers`).
 
         Args:
             event: Event providing the OneBot connection.
             group_id: Group that was muted.
             duration: Delay in seconds before unmuting.
+            operator: QQ number of the person who muted the group, recorded for
+                the restored audit trail.
+        """
+        capped = min(max(0, int(duration)), MAX_BAN_DURATION)
+        self.whole_ban.record(
+            group_id,
+            expires_at=time.time() + capped,
+            duration=capped,
+            operator=operator,
+        )
+        self._arm_whole_ban_timer(event, group_id, capped)
+
+    def _arm_whole_ban_timer(
+        self,
+        source: Any,
+        group_id: str,
+        delay: int,
+    ) -> None:
+        """Create (or replace) the unmute timer for a group.
+
+        Kept separate from :meth:`_schedule_whole_ban_off` because restoring a
+        timer after a restart has no event to work with -- only the platform
+        instance -- and the body must run with whichever source it was given.
+
+        Args:
+            source: Either an :class:`AstrMessageEvent` or a platform instance,
+                passed straight through to the OneBot client.
+            group_id: Group to unmute.
+            delay: Seconds to wait before lifting the mute.
         """
 
         async def _worker() -> None:
             try:
-                await asyncio.sleep(duration)
+                await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 return
             result = await self.client.set_group_whole_ban(
-                event,
+                source,
                 group_id,
                 enabled=False,
             )
+            # The deadline has passed either way, so the record is cleared even
+            # when the call fails; a failure is reported for manual follow-up.
+            self.whole_ban.remove(group_id)
+            self._whole_ban_tasks.pop(group_id, None)
             if result.ok:
                 logger.info(f"[QQAdmin] 群 {group_id} 全群禁言已到期解除")
+                self.audit.log(
+                    "whole_ban_auto_off",
+                    "system",
+                    group_id=group_id,
+                )
             else:
                 logger.warning(
-                    f"[QQAdmin] 群 {group_id} 全群禁言自动解除失败：{result.error}",
+                    f"[QQAdmin] 群 {group_id} 全群禁言自动解除失败：{result.error}，"
+                    "请手动解除",
+                )
+                self.audit.log(
+                    "whole_ban_auto_off",
+                    "system",
+                    group_id=group_id,
+                    result="failed",
+                    error=result.error,
                 )
 
         existing = self._whole_ban_tasks.pop(group_id, None)
         if existing and not existing.done():
             existing.cancel()
         self._whole_ban_tasks[group_id] = asyncio.create_task(_worker())
+
+    def _cancel_whole_ban_timer(self, group_id: str) -> WholeBanRecord | None:
+        """Stop and forget a pending unmute timer.
+
+        Args:
+            group_id: Group whose timer should be cancelled.
+
+        Returns:
+            The record that was pending, or ``None`` when there was none.
+        """
+        task = self._whole_ban_tasks.pop(group_id, None)
+        if task and not task.done():
+            task.cancel()
+        record = self.whole_ban.get(group_id)
+        self.whole_ban.remove(group_id)
+        return record
 
     # ------------------------------------------------------------------ #
     #  Commands: mute
@@ -683,7 +850,10 @@ class QQAdminPlugin(Star):
         )
         if duration:
             self._schedule_whole_ban_off(
-                event, group_id, min(duration, MAX_BAN_DURATION)
+                event,
+                group_id,
+                duration,
+                operator=operator.user_id,
             )
             text = self._text("whole_ban_timed", duration=format_duration(duration))
         else:
@@ -724,9 +894,12 @@ class QQAdminPlugin(Star):
                     yield item
                 return
 
-            task = self._whole_ban_tasks.pop(group_id, None)
-            if task and not task.done():
-                task.cancel()
+            previous = self._cancel_whole_ban_timer(group_id)
+            if previous:
+                logger.info(
+                    f"[QQAdmin] 群 {group_id} 的定时解除被手动解禁取消"
+                    f"（原定剩余 {format_duration(max(0, previous.remaining))}）",
+                )
 
             result = await self.client.set_group_whole_ban(
                 event,
@@ -1985,25 +2158,29 @@ class QQAdminPlugin(Star):
     # ------------------------------------------------------------------ #
 
     async def terminate(self) -> None:
-        """Cancel pending tasks when the plugin is unloaded or disabled.
+        """Release resources when the plugin is unloaded or disabled.
 
-        Whole-group mute timers cannot survive a restart, because OneBot has no
-        server-side timer to restore. Any mute still running therefore stays on
-        until an operator lifts it manually; a warning is logged to make that
-        visible.
+        Whole-group mute deadlines are deliberately **kept on disk**: the timers
+        cannot survive the process, but the schedule does, and
+        :meth:`restore_whole_ban_timers` re-arms them on the next load. Only the
+        in-memory tasks are dropped here.
 
-        Pending join requests are intentionally left on disk: the protocol token
-        usually outlives a reload, so they can still be resolved through
+        Pending join requests are left alone for the same reason -- the protocol
+        token usually outlives a reload, so they can still be resolved through
         ``/审核`` afterwards.
         """
-        for group_id, task in list(self._whole_ban_tasks.items()):
+        for task in list(self._whole_ban_tasks.values()):
             if not task.done():
                 task.cancel()
-                logger.warning(
-                    f"[QQAdmin] 群 {group_id} 的全群禁言定时任务因插件卸载被取消，"
-                    "该群的禁言状态需要手动解除",
-                )
         self._whole_ban_tasks.clear()
+
+        pending = self.whole_ban.load_all()
+        if pending:
+            logger.info(
+                f"[QQAdmin] 插件卸载时仍有 {len(pending)} 个全群禁言定时，"
+                "已保留在 whole_ban.json，下次加载时会自动恢复",
+            )
+
         self.client.invalidate_member_cache()
         if len(self.pending_reviews):
             logger.info(
