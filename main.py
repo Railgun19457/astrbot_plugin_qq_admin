@@ -213,15 +213,11 @@ class QQAdminPlugin(Star):
             ``True``/``False`` when the state could be read, ``None`` when the
             protocol implementation does not expose the information.
         """
-        try:
-            info = await platform.get_client().call_action(
-                "get_group_info",
-                group_id=int(group_id),
-            )
-        except Exception as exc:  # noqa: BLE001 - verification is best effort
-            logger.debug(f"[QQAdmin] 校验群 {group_id} 禁言状态失败：{exc}")
-            return None
+        # Routed through the OneBot facade so error handling and the
+        # multi-connection ``self_id`` parameter stay consistent.
+        info = await self.client.get_group_info(platform, group_id)
         if not isinstance(info, dict) or "group_all_shut" not in info:
+            logger.debug(f"[QQAdmin] 无法读取群 {group_id} 的全群禁言状态")
             return None
         return bool(info.get("group_all_shut"))
 
@@ -277,9 +273,6 @@ class QQAdminPlugin(Star):
         self.blacklist_default_reason = (
             str(blacklist_conf.get("default_reason") or "未填写原因").strip()
             or "未填写原因"
-        )
-        self._blacklist_block_message = bool(
-            blacklist_conf.get("block_message", False),
         )
 
         review_conf = config.get("join_review")
@@ -365,7 +358,6 @@ class QQAdminPlugin(Star):
         )
         self.notifier = Notifier(
             self.context,
-            self.templates,
             receipt_enabled=self.receipt_enabled,
             receipt_to_manage_session=self.receipt_to_manage_session,
         )
@@ -487,6 +479,8 @@ class QQAdminPlugin(Star):
         text: str,
         *,
         stop: bool = True,
+        receipt: bool = False,
+        group_id: str = "",
     ) -> AsyncGenerator[Any, None]:
         """Send a text reply and optionally stop the event.
 
@@ -494,12 +488,30 @@ class QQAdminPlugin(Star):
             event: Event to reply to.
             text: Message body. An empty string sends nothing.
             stop: Whether to stop event propagation afterwards.
+            receipt: Mark ``text`` as the outcome of an executed management
+                action. Such messages are withheld when
+                ``notify.operation_receipt`` is off, and mirrored into the
+                manage session when ``notify.receipt_to_manage_session`` is on.
+            group_id: Group the action happened in; used to resolve the manage
+                session of its group set when mirroring.
 
         Yields:
             The message result for the pipeline to deliver.
         """
-        if text:
+        mirror_text = text if receipt else ""
+        if text and (not receipt or self.notifier.receipt_enabled):
             yield event.plain_result(text)
+
+        if mirror_text and self.notifier.mirror_receipts and group_id:
+            target = self.notifier.resolve_target(
+                event,
+                find_group_set(self.group_sets, group_id),
+            )
+            # resolve_target falls back to the originating group; mirroring
+            # there would duplicate the receipt in the same session.
+            if target.value and target.value != str(event.unified_msg_origin or ""):
+                await self.notifier.send_to_session(target, mirror_text)
+
         if stop:
             event.stop_event()
 
@@ -766,7 +778,12 @@ class QQAdminPlugin(Star):
                     reason=parsed.reason,
                 )
 
-        async for item in self._reply(event, "\n".join(lines)):
+        async for item in self._reply(
+            event,
+            "\n".join(lines),
+            receipt=True,
+            group_id=group_id,
+        ):
             yield item
 
     async def _whole_ban(
@@ -819,14 +836,24 @@ class QQAdminPlugin(Star):
             )
             async for item in self._reply(event, self.confirm.build_prompt(summary)):
                 yield item
-            if not await self.confirm.request(event, action, operator):
+            outcome = await self.confirm.request(event, action, operator)
+            if outcome != "confirmed":
                 self._log_action(
                     "whole_ban",
                     operator,
                     group_id=group_id,
                     result="failed",
-                    error="cancelled",
+                    error=outcome,
                 )
+                async for item in self._reply(
+                    event,
+                    self._text(
+                        "confirm_timeout"
+                        if outcome == "timeout"
+                        else "confirm_cancelled"
+                    ),
+                ):
+                    yield item
                 return
 
         result = await self.client.set_group_whole_ban(event, group_id, enabled=True)
@@ -838,7 +865,12 @@ class QQAdminPlugin(Star):
                 result="failed",
                 error=result.error,
             )
-            async for item in self._reply(event, await self._describe_failure(result)):
+            async for item in self._reply(
+                event,
+                await self._describe_failure(result),
+                receipt=True,
+                group_id=group_id,
+            ):
                 yield item
             return
 
@@ -858,7 +890,12 @@ class QQAdminPlugin(Star):
             text = self._text("whole_ban_timed", duration=format_duration(duration))
         else:
             text = self._text("whole_ban_on")
-        async for item in self._reply(event, text):
+        async for item in self._reply(
+            event,
+            text,
+            receipt=True,
+            group_id=group_id,
+        ):
             yield item
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -908,7 +945,12 @@ class QQAdminPlugin(Star):
             )
             if result.ok:
                 self._log_action("whole_ban_off", operator, group_id=group_id)
-                async for item in self._reply(event, self._text("whole_ban_off")):
+                async for item in self._reply(
+                    event,
+                    self._text("whole_ban_off"),
+                    receipt=True,
+                    group_id=group_id,
+                ):
                     yield item
             else:
                 self._log_action(
@@ -921,6 +963,8 @@ class QQAdminPlugin(Star):
                 async for item in self._reply(
                     event,
                     await self._describe_failure(result),
+                    receipt=True,
+                    group_id=group_id,
                 ):
                     yield item
             return
@@ -965,7 +1009,12 @@ class QQAdminPlugin(Star):
                     error=result.error,
                 )
 
-        async for item in self._reply(event, "\n".join(lines)):
+        async for item in self._reply(
+            event,
+            "\n".join(lines),
+            receipt=True,
+            group_id=group_id,
+        ):
             yield item
 
     # ------------------------------------------------------------------ #
@@ -1030,14 +1079,24 @@ class QQAdminPlugin(Star):
             )
             async for item in self._reply(event, self.confirm.build_prompt(summary)):
                 yield item
-            if not await self.confirm.request(event, action, operator):
+            outcome = await self.confirm.request(event, action, operator)
+            if outcome != "confirmed":
                 self._log_action(
                     "kick",
                     operator,
                     group_id=group_id,
                     result="failed",
-                    error="cancelled",
+                    error=outcome,
                 )
+                async for item in self._reply(
+                    event,
+                    self._text(
+                        "confirm_timeout"
+                        if outcome == "timeout"
+                        else "confirm_cancelled"
+                    ),
+                ):
+                    yield item
                 return
 
         lines: list[str] = []
@@ -1066,7 +1125,12 @@ class QQAdminPlugin(Star):
                     reason=reason,
                 )
 
-        async for item in self._reply(event, "\n".join(lines)):
+        async for item in self._reply(
+            event,
+            "\n".join(lines),
+            receipt=True,
+            group_id=group_id,
+        ):
             yield item
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -1112,7 +1176,12 @@ class QQAdminPlugin(Star):
                 group_id=group_id,
                 message_id=message_id,
             )
-            async for item in self._reply(event, self._text("recall_success")):
+            async for item in self._reply(
+                event,
+                self._text("recall_success"),
+                receipt=True,
+                group_id=group_id,
+            ):
                 yield item
         else:
             self._log_action(
@@ -1123,7 +1192,12 @@ class QQAdminPlugin(Star):
                 error=result.error,
                 message_id=message_id,
             )
-            async for item in self._reply(event, await self._describe_failure(result)):
+            async for item in self._reply(
+                event,
+                await self._describe_failure(result),
+                receipt=True,
+                group_id=group_id,
+            ):
                 yield item
 
     # ------------------------------------------------------------------ #
@@ -1184,7 +1258,12 @@ class QQAdminPlugin(Star):
                 group_id=group_id,
                 content=shorten(text, 50),
             )
-            async for item in self._reply(event, self._text("notice_success")):
+            async for item in self._reply(
+                event,
+                self._text("notice_success"),
+                receipt=True,
+                group_id=group_id,
+            ):
                 yield item
         else:
             self._log_action(
@@ -1199,7 +1278,12 @@ class QQAdminPlugin(Star):
                 if result.unsupported
                 else self._text("api_failed", error=result.error)
             )
-            async for item in self._reply(event, hint):
+            async for item in self._reply(
+                event,
+                hint,
+                receipt=True,
+                group_id=group_id,
+            ):
                 yield item
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -1220,6 +1304,13 @@ class QQAdminPlugin(Star):
             "  踢 @某人 [理由]            将成员移出本群",
             "  撤回                       回复目标消息后使用",
             "  群公告 [内容]              不带内容则查看当前公告",
+            "  拉黑 @某人 [原因] [时长]   加入本群组共享黑名单",
+            "  解除拉黑 @某人             移出黑名单",
+            "  黑名单                     查看本群组黑名单",
+            "  群成员 [页码]              群成员概览",
+            "  群导出 成员 / 黑名单       导出 xlsx 并上传群文件",
+            "  审核 / 审核列表            查看待审核的进群申请",
+            "  审核同意 / 审核拒绝 <编号> 处理指定申请",
             "  群管状态                   查看运行状态与群组归属",
             "",
             "提示：指令与 @ 之间需要空格；若与其他插件指令重名，",
@@ -1273,6 +1364,11 @@ class QQAdminPlugin(Star):
         conflicted = self._conflicting_groups()
         if conflicted:
             lines.append(f"  配置冲突群号：{', '.join(conflicted)}")
+
+        names = [group_set["name"] for group_set in self.group_sets]
+        duplicated = sorted({name for name in names if names.count(name) > 1})
+        if duplicated:
+            lines.append(f"  群组重名：{'、'.join(duplicated)}（同名群组共享黑名单）")
 
         async for item in self._reply(event, "\n".join(lines)):
             yield item
@@ -1361,7 +1457,12 @@ class QQAdminPlugin(Star):
                 duration=duration or 0,
             )
 
-        async for item in self._reply(event, "\n".join(lines)):
+        async for item in self._reply(
+            event,
+            "\n".join(lines),
+            receipt=True,
+            group_id=group_id,
+        ):
             yield item
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -1432,7 +1533,12 @@ class QQAdminPlugin(Star):
                     ),
                 )
 
-        async for item in self._reply(event, "\n".join(lines)):
+        async for item in self._reply(
+            event,
+            "\n".join(lines),
+            receipt=True,
+            group_id=group_id,
+        ):
             yield item
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -1820,7 +1926,12 @@ class QQAdminPlugin(Star):
                 group_id=request.group_id,
                 action="已同意" if action == "approve" else "已拒绝",
             )
-            async for item in self._reply(event, summary):
+            async for item in self._reply(
+                event,
+                summary,
+                receipt=True,
+                group_id=request.group_id,
+            ):
                 yield item
             if group_set:
                 await self._notify_review(
@@ -1835,6 +1946,8 @@ class QQAdminPlugin(Star):
             async for item in self._reply(
                 event,
                 self._text("api_failed", error="协议端拒绝了该操作"),
+                receipt=True,
+                group_id=request.group_id,
             ):
                 yield item
 
@@ -2087,6 +2200,8 @@ class QQAdminPlugin(Star):
             async for item in self._reply(
                 event,
                 self._text("export_failed", error=result.error),
+                receipt=True,
+                group_id=group_id,
             ):
                 yield item
             return
@@ -2126,7 +2241,12 @@ class QQAdminPlugin(Star):
                 count=result.row_count,
                 path=result.path,
             )
-        async for item in self._reply(event, text):
+        async for item in self._reply(
+            event,
+            text,
+            receipt=True,
+            group_id=group_id,
+        ):
             yield item
 
     # ------------------------------------------------------------------ #

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from astrbot.api import FunctionTool, logger
 
-from .config import format_duration
+from .config import MAX_BAN_DURATION, format_duration
 from .messages import render_template
 
 if TYPE_CHECKING:
@@ -84,6 +84,28 @@ def _no_group() -> str:
         The refusal text.
     """
     return "error: 此工具只能在群聊中使用"
+
+
+def _safe_int(value: Any) -> int | None:
+    """Coerce a model supplied value into an integer without raising.
+
+    Models occasionally pass strings such as ``"10m"`` or ``null`` for a
+    numeric parameter; the tool contract is to answer with text instead of
+    letting an exception escape. Booleans are rejected because ``int(True)``
+    would silently turn a wrong parameter into ``1``.
+
+    Args:
+        value: Raw value from the model.
+
+    Returns:
+        The converted integer, or ``None`` when ``value`` is not a number.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class _PluginTool(FunctionTool):
@@ -181,7 +203,12 @@ class QqBanMemberTool(_PluginTool):
         if error:
             return error
 
-        duration = max(0, int(duration_seconds))
+        raw_duration = _safe_int(duration_seconds)
+        if raw_duration is None:
+            # Defaulting to 0 here would silently *unmute* the member, so an
+            # unusable value is refused instead.
+            return "error: duration_seconds 必须是整数秒数，0 表示解禁"
+        duration = max(0, raw_duration)
         result = await plugin.client.set_group_ban(event, group_id, target, duration)
         name = await plugin._resolve_member_name(event, group_id, target)
         if not result.ok:
@@ -226,14 +253,19 @@ class QqWholeBanTool(_PluginTool):
 
     name: str = "qq_whole_ban"
     description: str = (
-        "开启或关闭全群禁言。注意 OneBot 的全群禁言是纯开关，"
-        "duration_seconds 只用于提示自动解除时间，服务端不会自动解除。"
+        "开启或关闭全群禁言。OneBot 的全群禁言是纯开关，服务端不会自动解除；"
+        "开启时可用 duration_seconds 指定时长，到期后由插件自动解除。"
     )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
                 "enabled": {"type": "boolean", "description": "true 开启，false 解除"},
+                "duration_seconds": {
+                    "type": "integer",
+                    "description": "开启后自动解除的秒数，省略或 0 表示不自动解除，"
+                    "最长 2592000（30 天）",
+                },
                 "reason": {"type": "string", "description": "操作理由，可省略"},
                 "confirm": {
                     "type": "boolean",
@@ -248,6 +280,7 @@ class QqWholeBanTool(_PluginTool):
         self,
         event: AstrMessageEvent,
         enabled: bool,
+        duration_seconds: int = 0,
         reason: str = "",
         confirm: bool = False,
     ) -> str:
@@ -256,6 +289,8 @@ class QqWholeBanTool(_PluginTool):
         Args:
             event: The tool call event.
             enabled: ``True`` mutes everyone, ``False`` lifts it.
+            duration_seconds: When enabling, seconds until the mute is lifted
+                automatically; ``0`` keeps it until lifted manually.
             reason: Justification recorded in the audit log.
             confirm: Must be ``True`` to actually act.
 
@@ -271,7 +306,13 @@ class QqWholeBanTool(_PluginTool):
         if not allowed:
             return _denied(plugin, deny)
 
+        raw_duration = _safe_int(duration_seconds)
+        if raw_duration is None:
+            return "error: duration_seconds 必须是整数秒数，0 或省略表示不自动解除"
+        duration = min(max(0, raw_duration), MAX_BAN_DURATION)
         action_label = "开启全群禁言" if enabled else "解除全群禁言"
+        if enabled and duration:
+            action_label += f"（{format_duration(duration)} 后自动解除）"
         if not confirm:
             return (
                 f"待确认：{action_label}。请先向用户确认，用户同意后"
@@ -295,12 +336,27 @@ class QqWholeBanTool(_PluginTool):
             "whole_ban" if enabled else "whole_ban_off",
             event,
             group_id=group_id,
+            duration=duration,
             reason=reason,
         )
-        return render_template(
-            plugin.templates,
-            "whole_ban_on" if enabled else "whole_ban_off",
-        )
+
+        if not enabled:
+            plugin._cancel_whole_ban_timer(group_id)
+            return render_template(plugin.templates, "whole_ban_off")
+
+        if duration:
+            plugin._schedule_whole_ban_off(
+                event,
+                group_id,
+                duration,
+                operator=str(event.get_sender_id() or ""),
+            )
+            return render_template(
+                plugin.templates,
+                "whole_ban_timed",
+                duration=format_duration(duration),
+            )
+        return render_template(plugin.templates, "whole_ban_on")
 
 
 @dataclass
@@ -584,7 +640,10 @@ class QqBlacklistAddTool(_PluginTool):
             return error
 
         final_reason = str(reason or "").strip() or plugin.blacklist_default_reason
-        duration = max(0, int(duration_seconds or 0))
+        raw_duration = _safe_int(duration_seconds)
+        if raw_duration is None:
+            return "error: duration_seconds 必须是整数秒数，0 或省略表示永久"
+        duration = max(0, raw_duration)
         scope = plugin._scope(group_id)
         name = await plugin._resolve_member_name(event, group_id, target)
         entry = plugin.blacklist.add(
@@ -819,7 +878,8 @@ class QqMemberListTool(_PluginTool):
         if not members:
             return "error: 无法获取群成员列表"
 
-        capped = max(1, min(int(limit or 50), 200))
+        # ``or 50`` also covers a non-numeric or zero limit from the model.
+        capped = max(1, min(_safe_int(limit) or 50, 200))
         lines = [
             f"{index}. {m.get('card') or m.get('nickname') or m.get('user_id')}"
             f"({m.get('user_id')}) {_role_text(str(m.get('role') or ''))}"

@@ -268,7 +268,8 @@ class BlacklistStore:
         bucket = self._bucket(scope, create=False)
         count = len(bucket)
         if count:
-            self._store.data.pop(scope, None)
+            # Pop the same normalized key ``_bucket`` uses, not the raw scope.
+            self._store.data.pop(str(scope or "unknown"), None)
             self._store.save()
         return count
 

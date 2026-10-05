@@ -164,6 +164,7 @@ class Exporter:
             rows=data,
             filename=f"members-{group_id}-{_timestamp()}.xlsx",
             heading=title,
+            truncated=truncated,
             note=(
                 f"共 {len(members)} 人，仅显示前 {self._max_members} 条"
                 if truncated
@@ -223,6 +224,7 @@ class Exporter:
         filename: str,
         heading: str,
         note: str,
+        truncated: bool = False,
     ) -> ExportResult:
         """Write a single-sheet workbook.
 
@@ -233,6 +235,7 @@ class Exporter:
             filename: File name to use.
             heading: Merged title row content.
             note: Subtitle describing the data set.
+            truncated: Whether ``max_members`` clipped the data set.
 
         Returns:
             The export outcome.
@@ -276,6 +279,7 @@ class Exporter:
             path=str(target.resolve()),
             filename=filename,
             row_count=len(rows),
+            truncated=truncated,
         )
 
 

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from astrbot.api import logger
-
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
 
@@ -91,12 +89,3 @@ def shorten(text: str, limit: int = 20) -> str:
     if len(clean) <= limit:
         return clean
     return clean[:limit] + "…"
-
-
-def log_warning(message: str) -> None:
-    """Emit a plugin-prefixed warning.
-
-    Args:
-        message: Message body without the plugin prefix.
-    """
-    logger.warning(f"[QQAdmin] {message}")

@@ -125,19 +125,6 @@ def is_all_target(text: str) -> bool:
     return str(text or "").strip().lower() in {ALL_TARGET_KEYWORD, "所有人", "all"}
 
 
-def looks_like_qq(text: str) -> bool:
-    """Return whether the text is a plausible QQ number.
-
-    Args:
-        text: Raw token from the command arguments.
-
-    Returns:
-        ``True`` when the token is 5-12 ASCII digits and not the ``all`` marker.
-    """
-    raw = str(text or "").strip()
-    return raw.isdigit() and 5 <= len(raw) <= 12
-
-
 # ------------------------------------------------------------------ #
 #  Group set normalization
 # ------------------------------------------------------------------ #
@@ -214,6 +201,8 @@ def build_group_index(group_sets: list[dict[str, Any]]) -> dict[str, str]:
 
     When the same group id appears in multiple sets the first occurrence wins
     and a warning is logged; conflicting entries are never silently dropped.
+    A duplicate *set name* is warned about as well, because the name doubles as
+    the blacklist bucket key and would silently merge two sets' entries.
 
     Args:
         group_sets: Output of :func:`normalize_group_sets`.
@@ -221,6 +210,14 @@ def build_group_index(group_sets: list[dict[str, Any]]) -> dict[str, str]:
     Returns:
         Mapping from group id to the owning set name.
     """
+    names = [group_set["name"] for group_set in group_sets]
+    duplicated = sorted({name for name in names if names.count(name) > 1})
+    if duplicated:
+        logger.warning(
+            f"[QQAdmin] 群组名称重复：{'、'.join(duplicated)}。"
+            "同名群组会共享同一份黑名单，请改用不重名的群组名称",
+        )
+
     index: dict[str, str] = {}
     for group_set in group_sets:
         name = group_set["name"]

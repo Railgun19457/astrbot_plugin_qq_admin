@@ -115,7 +115,7 @@ class ConfirmManager:
         event: AstrMessageEvent,
         action: PendingAction,
         operator: PermissionContext,
-    ) -> bool:
+    ) -> str:
         """Ask the group to confirm an action and wait for the answer.
 
         Args:
@@ -125,8 +125,11 @@ class ConfirmManager:
                 user may answer, so a bystander cannot confirm on their behalf.
 
         Returns:
-            ``True`` when the operator confirmed, ``False`` on rejection,
-            timeout, or any error.
+            ``"confirmed"`` when the operator agreed. Otherwise ``"cancelled"``
+            for an explicit rejection, ``"timeout"`` when nobody answered in
+            time, or ``"error"`` when the waiter itself failed, so the caller
+            can tell the group why nothing happened. Only ``"confirmed"`` means
+            the action may proceed.
         """
         operator_id = operator.user_id
         confirm_words = self._confirm_words
@@ -174,9 +177,9 @@ class ConfirmManager:
             await _waiter(event)
         except TimeoutError:
             logger.info("[QQAdmin] 二次确认超时，操作已取消")
-            return False
+            return "timeout"
         except Exception as exc:  # noqa: BLE001 - confirmation must not crash
             logger.warning(f"[QQAdmin] 二次确认过程出错：{exc}")
-            return False
+            return "error"
 
-        return bool(decision and decision[0])
+        return "confirmed" if decision and decision[0] else "cancelled"

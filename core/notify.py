@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 
-from .messages import render_template
-
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.star import Context
@@ -116,7 +114,6 @@ class Notifier:
 
     Attributes:
         _context: AstrBot context used for outbound messages.
-        _templates: Template mapping from the plugin configuration.
         _receipt_to_manage_session: Whether operation receipts are mirrored to
             the manage session in addition to the originating group.
         _receipt_enabled: Whether operation receipts are sent at all.
@@ -125,7 +122,6 @@ class Notifier:
     def __init__(
         self,
         context: Context,
-        templates: dict[str, Any],
         *,
         receipt_enabled: bool = True,
         receipt_to_manage_session: bool = False,
@@ -134,12 +130,10 @@ class Notifier:
 
         Args:
             context: AstrBot context.
-            templates: Template mapping.
             receipt_enabled: Whether command handlers send receipts at all.
             receipt_to_manage_session: Mirror receipts into the manage session.
         """
         self._context = context
-        self._templates = templates
         self._receipt_enabled = bool(receipt_enabled)
         self._receipt_to_manage_session = bool(receipt_to_manage_session)
 
@@ -214,25 +208,3 @@ class Notifier:
         if not sent:
             logger.warning(f"[QQAdmin] 未找到会话 {target.value}，通知未发送")
         return bool(sent)
-
-    async def notify_review(
-        self,
-        event: AstrMessageEvent,
-        group_set: dict[str, Any] | None,
-        **values: Any,
-    ) -> bool:
-        """Send a join-review notification to the manage session.
-
-        Args:
-            event: Event providing the platform instance id.
-            group_set: Owning group set; ``None`` disables the notification.
-            **values: Template placeholders.
-
-        Returns:
-            ``True`` when the message was delivered.
-        """
-        if not group_set or not group_set.get("notice_enabled", True):
-            return False
-
-        text = render_template(self._templates, "review_new_request", **values)
-        return await self.send_to_session(self.resolve_target(event, group_set), text)
