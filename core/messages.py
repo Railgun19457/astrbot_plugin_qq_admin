@@ -48,6 +48,12 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "review_empty": "当前没有待审核的进群申请",
     "review_bad_index": "编号超出范围（当前共 {count} 条）",
     "review_decided": "已{action} {user_id} 加入群 {group_id} 的申请",
+    "member_header": "本群共 {count} 人（第 {page} 页）：",
+    "member_list_failed": "无法获取群成员列表，请稍后重试",
+    "export_success": "已导出{kind}表格（{count} 条）并上传到群文件",
+    "export_local_only": "已生成{kind}表格（{count} 条），但上传失败。\n本地路径：{path}",
+    "export_empty": "{kind}为空，没有可导出的数据",
+    "export_failed": "导出失败：{error}",
 }
 
 

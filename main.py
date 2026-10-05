@@ -39,6 +39,7 @@ from .core.config import (
     resolve_blacklist_scope,
 )
 from .core.confirm import ConfirmManager, PendingAction
+from .core.export import Exporter, to_file_uri
 from .core.messages import render_template
 from .core.notify import Notifier
 from .core.onebot import ActionResult, OneBotClient
@@ -54,6 +55,7 @@ from .core.review import (
     normalize_keyword_rules,
     parse_request_event,
 )
+from .core.tools import TOOL_NAMES, build_tools, log_registered
 from .core.utils import (
     extract_at_targets,
     extract_reply_message_id,
@@ -115,6 +117,7 @@ class QQAdminPlugin(Star):
 
         # Trim the audit log once at startup rather than on every write.
         self.audit.trim()
+        self.exporter.cleanup()
 
         logger.info(
             f"[QQAdmin] 已加载 | 群组 {len(self.group_sets)} 个 | "
@@ -160,6 +163,8 @@ class QQAdminPlugin(Star):
         blacklist_conf = config.get("blacklist")
         blacklist_conf = blacklist_conf if isinstance(blacklist_conf, dict) else {}
 
+        export_conf = config.get("export")
+        export_conf = export_conf if isinstance(export_conf, dict) else {}
         self.receipt_enabled = bool(notify.get("operation_receipt", True))
         self.receipt_to_manage_session = bool(
             notify.get("receipt_to_manage_session", False),
@@ -200,6 +205,21 @@ class QQAdminPlugin(Star):
 
         self._level_unsupported_warned = False
 
+        self._export_upload = bool(export_conf.get("upload_to_group", True))
+        self._export_max_members = max(1, int(export_conf.get("max_members", 3000)))
+        self._export_cleanup_hours = max(0, int(export_conf.get("cleanup_hours", 24)))
+
+        raw_tools = config.get("llm_tool_options")
+        requested = (
+            {str(item).strip() for item in raw_tools if str(item).strip()}
+            if isinstance(raw_tools, (list, tuple, set))
+            else set()
+        )
+        # Only names this build actually implements are accepted.
+        self.enabled_tools: list[str] = [
+            name for name in TOOL_NAMES if name in requested
+        ]
+
         self._confirm_enabled = bool(confirm_conf.get("enabled", True))
         self._confirm_timeout = max(5, int(confirm_conf.get("timeout", 60)))
         self._confirm_words = normalize_words(
@@ -236,13 +256,35 @@ class QQAdminPlugin(Star):
         )
         self.blacklist = BlacklistStore(data_dir, enabled=self._blacklist_enabled)
         self.pending_reviews = PendingReviewStore(data_dir)
+        self.exporter = Exporter(
+            data_dir / "exports",
+            max_members=self._export_max_members,
+            cleanup_hours=self._export_cleanup_hours,
+        )
         self.notifier = Notifier(
             self.context,
             self.templates,
             receipt_enabled=self.receipt_enabled,
             receipt_to_manage_session=self.receipt_to_manage_session,
         )
+        self._register_tools()
         self._build_confirm_manager()
+
+    def _register_tools(self) -> None:
+        """Register the LLM tools the user opted into.
+
+        Nothing is exposed by default: the framework's tool permission gate
+        treats every non-builtin tool as available to ordinary members, so
+        exposing these without an explicit opt-in would let anyone who can talk
+        to the model mute or kick people.
+        """
+        self.tools = build_tools(self)
+        selected = [
+            self.tools[name] for name in self.enabled_tools if name in self.tools
+        ]
+        if selected:
+            self.context.add_llm_tools(*selected)
+        log_registered([tool.name for tool in selected])
 
     def _build_confirm_manager(self) -> None:
         """Instantiate the confirmation manager from the parsed policy.
@@ -1622,6 +1664,297 @@ class QQAdminPlugin(Star):
                 self._text("api_failed", error="协议端拒绝了该操作"),
             ):
                 yield item
+
+    # ------------------------------------------------------------------ #
+    #  Helpers shared with the LLM tools
+    # ------------------------------------------------------------------ #
+
+    def _tool_group_id(self, event: AstrMessageEvent) -> str:
+        """Resolve the group a tool call operates on.
+
+        The group id is never a tool parameter; it always comes from the event,
+        so a model cannot be steered into touching another group.
+
+        Args:
+            event: The tool call event.
+
+        Returns:
+            The group id, or an empty string when unavailable.
+        """
+        if not self.enabled:
+            return ""
+        if event.get_platform_name() != SUPPORTED_PLATFORM:
+            return ""
+        return str(event.get_group_id() or "")
+
+    def _extract_targets(self, event: AstrMessageEvent) -> list[str]:
+        """Extract ``@`` targets from an event.
+
+        Exposed for the tools module so target resolution stays in one place.
+
+        Args:
+            event: Event to inspect.
+
+        Returns:
+            De-duplicated QQ numbers.
+        """
+        return extract_at_targets(event)
+
+    async def _tool_permission(
+        self,
+        event: AstrMessageEvent,
+        capability: str,
+    ) -> tuple[bool, str]:
+        """Check whether the tool caller may use a capability.
+
+        AstrBot does not gate these tools for us, so every tool re-checks the
+        caller. This is the load-bearing check that stops a user from talking
+        the model into muting someone.
+
+        Args:
+            event: The tool call event.
+            capability: Capability key to check.
+
+        Returns:
+            ``(allowed, reason)``.
+        """
+        if not self.enabled:
+            return False, "插件当前已禁用"
+        if event.get_platform_name() != SUPPORTED_PLATFORM:
+            return False, "本插件仅支持 aiocqhttp(OneBot v11) 平台"
+        context = await self._permission_context(event)
+        return check_capability(context, self.permission_settings, capability)
+
+    def _tool_audit(
+        self,
+        action: str,
+        event: AstrMessageEvent,
+        *,
+        target: str = "",
+        group_id: str = "",
+        result: str = "ok",
+        error: str = "",
+        **detail: Any,
+    ) -> None:
+        """Record a tool action in the audit trail.
+
+        Args:
+            action: Machine readable action name.
+            event: The tool call event, used for the operator id.
+            target: QQ number the action applied to.
+            group_id: Group the action happened in.
+            result: ``"ok"`` or ``"failed"``.
+            error: Failure description.
+            **detail: Extra context recorded verbatim.
+        """
+        self.audit.log(
+            action,
+            str(event.get_sender_id() or ""),
+            target=target,
+            group_id=group_id,
+            result=result,
+            error=error,
+            via="llm_tool",
+            **detail,
+        )
+
+    def _group_set_name(self, group_id: str) -> str:
+        """Return the name of the group set owning a group.
+
+        Args:
+            group_id: QQ group id.
+
+        Returns:
+            The group set name, or an empty string when the group is
+            unconfigured.
+        """
+        group_set = find_group_set(self.group_sets, group_id)
+        return str(group_set["name"]) if group_set else ""
+
+    # ------------------------------------------------------------------ #
+    #  Commands: member list / export
+    # ------------------------------------------------------------------ #
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("群成员", alias={"gmembers"})
+    async def member_list(
+        self,
+        event: AstrMessageEvent,
+        page: str = "",
+    ) -> AsyncGenerator[Any, None]:
+        """查看群成员概览。
+
+        Args:
+            event: 消息事件。
+            page: 页码，从 1 开始。允许省略。
+        """
+        if self._should_skip(event):
+            return
+        group_id = str(event.get_group_id())
+        operator = await self._permission_context(event)
+
+        allowed, deny_reason = check_capability(
+            operator,
+            self.permission_settings,
+            "query",
+        )
+        if not allowed:
+            async for item in self._reply(
+                event,
+                self._text("no_permission", reason=deny_reason),
+            ):
+                yield item
+            return
+
+        members = await self.client.get_group_member_list(event, group_id)
+        if not members:
+            async for item in self._reply(event, self._text("member_list_failed")):
+                yield item
+            return
+
+        page_number = int(page) if str(page).strip().isdigit() else 1
+        page_number = max(1, page_number)
+        total_pages = max(1, (len(members) + MEMBER_PAGE_SIZE - 1) // MEMBER_PAGE_SIZE)
+        page_number = min(page_number, total_pages)
+        start = (page_number - 1) * MEMBER_PAGE_SIZE
+        chunk = members[start : start + MEMBER_PAGE_SIZE]
+
+        lines = [self._text("member_header", count=len(members), page=page_number)]
+        for index, member in enumerate(chunk, start=start + 1):
+            name = member.get("card") or member.get("nickname") or member.get("user_id")
+            role = str(member.get("role") or "")
+            marker = {"owner": " [群主]", "admin": " [管理员]"}.get(role, "")
+            lines.append(f"{index}. {name}({member.get('user_id')}){marker}")
+        if page_number < total_pages:
+            lines.append(
+                f"第 {page_number}/{total_pages} 页，使用「群成员 {page_number + 1}」翻页"
+            )
+        elif total_pages > 1:
+            lines.append(f"第 {page_number}/{total_pages} 页（已到最后一页）")
+        async for item in self._reply(event, "\n".join(lines)):
+            yield item
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("群导出", alias={"gexport"})
+    async def export_command(
+        self,
+        event: AstrMessageEvent,
+        args: GreedyStr = "",
+    ) -> AsyncGenerator[Any, None]:
+        """导出群成员名单或黑名单表格并上传到群文件。
+
+        Args:
+            event: 消息事件。
+            args: 「成员」或「黑名单」。允许省略。
+        """
+        if self._should_skip(event):
+            return
+        group_id = str(event.get_group_id())
+        operator = await self._permission_context(event)
+
+        allowed, deny_reason = check_capability(
+            operator,
+            self.permission_settings,
+            "export",
+        )
+        if not allowed:
+            async for item in self._reply(
+                event,
+                self._text("no_permission", reason=deny_reason),
+            ):
+                yield item
+            return
+
+        kind = str(args or "").strip() or "成员"
+        if kind not in ("成员", "黑名单", "members", "blacklist"):
+            async for item in self._reply(
+                event,
+                "用法：群导出 成员 / 群导出 黑名单",
+            ):
+                yield item
+            return
+
+        if kind in ("黑名单", "blacklist"):
+            scope = self._scope(group_id)
+            entries = self.blacklist.list_entries(scope)
+            if not entries:
+                async for item in self._reply(
+                    event,
+                    self._text("export_empty", kind="黑名单"),
+                ):
+                    yield item
+                return
+            group_set = find_group_set(self.group_sets, group_id)
+            result = self.exporter.export_blacklist(
+                scope,
+                entries,
+                group_ids=list(group_set["group_ids"]) if group_set else [group_id],
+            )
+        else:
+            info = await self.client.get_group_info(event, group_id)
+            members = await self.client.get_group_member_list(
+                event,
+                group_id,
+                use_cache=False,
+            )
+            if not members:
+                async for item in self._reply(
+                    event,
+                    self._text("member_list_failed"),
+                ):
+                    yield item
+                return
+            result = self.exporter.export_members(
+                group_id,
+                members,
+                group_name=str((info or {}).get("group_name") or ""),
+            )
+
+        if not result:
+            async for item in self._reply(
+                event,
+                self._text("export_failed", error=result.error),
+            ):
+                yield item
+            return
+
+        self._log_action(
+            "export",
+            operator,
+            group_id=group_id,
+            kind=kind,
+            rows=result.row_count,
+        )
+
+        uploaded = False
+        if self._export_upload:
+            upload = await self.client.upload_group_file(
+                event,
+                group_id,
+                to_file_uri(result.path),
+                result.filename,
+            )
+            uploaded = upload.ok
+            if not upload.ok:
+                logger.warning(
+                    f"[QQAdmin] 上传导出文件失败：{upload.error}，改为返回本地路径",
+                )
+
+        if uploaded:
+            text = self._text(
+                "export_success",
+                kind=kind,
+                count=result.row_count,
+            )
+        else:
+            text = self._text(
+                "export_local_only",
+                kind=kind,
+                count=result.row_count,
+                path=result.path,
+            )
+        async for item in self._reply(event, text):
+            yield item
 
     # ------------------------------------------------------------------ #
     #  Failure rendering
