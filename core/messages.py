@@ -1,0 +1,91 @@
+"""User-facing message templates.
+
+Templates come from the plugin configuration and may reference placeholders
+such as ``{target_name}``. Rendering never raises: a malformed template falls
+back to a safe default so that a typo in the config cannot break a command.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from astrbot.api import logger
+
+#: Defaults used both for the config schema and as a last-resort fallback.
+DEFAULT_TEMPLATES: dict[str, str] = {
+    "ban_success": "已禁言 {target_name}({target_id}) {duration}",
+    "unban_success": "已解除 {target_name}({target_id}) 的禁言",
+    "whole_ban_on": "已开启全群禁言",
+    "whole_ban_off": "已解除全群禁言",
+    "whole_ban_timed": "已开启全群禁言，将在 {duration} 后自动解除",
+    "kick_success": "已将 {target_name}({target_id}) 移出本群",
+    "recall_success": "已撤回指定消息",
+    "notice_success": "群公告已更新",
+    "notice_empty": "当前没有群公告",
+    "notice_unsupported": "当前协议端不支持读取群公告",
+    "no_permission": "你没有权限执行该操作：{reason}",
+    "no_target": "请 @ 一个目标，或回复对方的消息后再执行本指令",
+    "bad_duration": "时长格式不正确，示例：10m、2h、1d、600",
+    "api_failed": "操作失败：{error}",
+    "api_unsupported": "当前协议端不支持该操作，建议改用 NapCat 或 Lagrange",
+    "confirm_prompt": "即将执行：{summary}\n回复「同意」继续，回复「取消」放弃（{timeout} 秒内有效）",
+    "confirm_timeout": "操作已取消（等待确认超时）",
+    "confirm_cancelled": "操作已取消",
+    "confirm_not_operator": "只有发起该操作的人可以确认",
+    "group_unconfigured": "本群未加入任何群组，部分功能（共享黑名单、进群审核）不可用",
+}
+
+
+def render_template(
+    templates: dict[str, Any],
+    key: str,
+    **values: Any,
+) -> str:
+    """Render a configured template.
+
+    A template referencing a placeholder that was not supplied would make
+    ``str.format`` raise, so any formatting failure falls back to the built-in
+    default for ``key`` and logs a warning. This keeps a typo in the config from
+    breaking a command.
+
+    Args:
+        templates: Template mapping from the plugin configuration.
+        key: Template key, e.g. ``ban_success``.
+        **values: Placeholder values.
+
+    Returns:
+        The rendered message. Never empty when a default exists for ``key``.
+    """
+    fallback = DEFAULT_TEMPLATES.get(key, "")
+    raw = templates.get(key)
+    template = str(raw) if isinstance(raw, str) and raw.strip() else fallback
+    if not template:
+        return ""
+
+    safe_values = {name: _stringify(value) for name, value in values.items()}
+    try:
+        return template.format(**safe_values)
+    except (KeyError, IndexError, ValueError) as exc:
+        logger.warning(
+            f"[QQAdmin] 消息模板 `{key}` 渲染失败（{exc}），已回退到默认文案",
+        )
+        try:
+            return fallback.format(**safe_values)
+        except (KeyError, IndexError, ValueError):
+            return fallback
+
+
+def _stringify(value: Any) -> str:
+    """Convert a placeholder value into display text.
+
+    Args:
+        value: Arbitrary placeholder value.
+
+    Returns:
+        A plain string; ``None`` becomes an empty string.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value)

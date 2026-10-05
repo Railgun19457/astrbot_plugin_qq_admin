@@ -1,0 +1,363 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用插件",
+    "hint": "关闭后所有指令与 LLM 工具都不会响应",
+    "default": true
+  },
+  "priority": {
+    "type": "int",
+    "description": "插件优先级",
+    "hint": "数值越大越先执行。默认值即可，如不确定请勿修改",
+    "default": 0
+  },
+  "default_ban_duration": {
+    "type": "string",
+    "description": "默认禁言时长",
+    "hint": "未指定时长时使用。支持 600（秒）、10m、2h、1d 等写法",
+    "default": "10m"
+  },
+  "llm_tool_options": {
+    "type": "list",
+    "description": "函数工具选项",
+    "hint": "选择向 LLM 暴露的函数工具，未勾选的不会暴露。默认为空：AstrBot 对非内置工具的权限门控默认不拦截，开启前请确认你信任能触发模型的人，并建议在 WebUI 的「扩展 → 组件」里把这些工具设为 admin",
+    "options": [
+      "qq_ban_member",
+      "qq_whole_ban",
+      "qq_kick_member",
+      "qq_recall_message",
+      "qq_send_group_notice",
+      "qq_blacklist_add",
+      "qq_blacklist_remove",
+      "qq_blacklist_query",
+      "qq_group_info",
+      "qq_member_list"
+    ],
+    "default": []
+  },
+  "group_sets": {
+    "type": "template_list",
+    "description": "群组定义",
+    "hint": "每个群组包含若干 QQ 群，组内共享黑名单；管理会话用于接收进群审核通知。未加入任何群组的群会退化为单群模式",
+    "templates": {
+      "group_set": {
+        "name": "群组",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "type": "string",
+            "description": "群组名称",
+            "hint": "仅用于显示，例如「主群组」",
+            "default": ""
+          },
+          "group_ids": {
+            "type": "list",
+            "items": {
+              "type": "string"
+            },
+            "description": "群号列表",
+            "hint": "属于该群组的 QQ 群号，字符串形式。同一个群号不要重复出现在多个群组里",
+            "default": []
+          },
+          "manage_session": {
+            "type": "string",
+            "description": "管理会话",
+            "hint": "接收进群审核通知的会话。格式 group:123456（群聊）或 private:10001（私聊）。留空则回退到申请所在的群",
+            "default": ""
+          },
+          "notice_enabled": {
+            "type": "bool",
+            "description": "开启审核通知",
+            "default": true
+          }
+        }
+      }
+    }
+  },
+  "permissions": {
+    "type": "object",
+    "description": "权限设置",
+    "items": {
+      "custom_whitelist": {
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "description": "自定义用户白名单",
+        "hint": "这些 QQ 号拥有等同 AstrBot 管理员的权限，可使用全部指令",
+        "default": []
+      },
+      "allow_astrbot_admin": {
+        "type": "bool",
+        "description": "允许 AstrBot 全局管理员",
+        "hint": "AstrBot 配置里的 admins_id 列表",
+        "default": true
+      },
+      "allow_group_admin": {
+        "type": "bool",
+        "description": "允许群主与群管理员",
+        "hint": "按 OneBot 返回的 role 字段判定（owner / admin）",
+        "default": true
+      },
+      "allow_member_command": {
+        "type": "bool",
+        "description": "允许普通成员使用查询类指令",
+        "hint": "仅影响所需等级为「任何人」的指令，例如查看黑名单、查看群组状态",
+        "default": true
+      },
+      "capability_level": {
+        "type": "dict",
+        "description": "各能力所需权限等级",
+        "items": {},
+        "template_schema": {
+          "ban": {
+            "name": "禁言",
+            "description": "禁言与解禁普通成员",
+            "type": "string",
+            "default": "group_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
+          "whole_ban": {
+            "name": "全群禁言",
+            "description": "开启或解除全群禁言",
+            "type": "string",
+            "default": "group_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
+          "kick": {
+            "name": "踢人",
+            "description": "将成员移出本群",
+            "type": "string",
+            "default": "group_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
+          "recall": {
+            "name": "撤回消息",
+            "description": "撤回群内消息",
+            "type": "string",
+            "default": "group_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
+          "notice": {
+            "name": "群公告",
+            "description": "发送与查看群公告",
+            "type": "string",
+            "default": "group_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
+          "blacklist": {
+            "name": "黑名单增删",
+            "description": "添加与移除黑名单成员",
+            "type": "string",
+            "default": "group_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
+          "query": {
+            "name": "查询",
+            "description": "查看黑名单、群信息、运行状态等只读信息",
+            "type": "string",
+            "default": "any",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
+          "export": {
+            "name": "导出表格",
+            "description": "导出成员名单与黑名单表格",
+            "type": "string",
+            "default": "astrbot_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          }
+        }
+      }
+    }
+  },
+  "confirm": {
+    "type": "object",
+    "description": "高危操作确认",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用二次确认",
+        "default": true
+      },
+      "timeout": {
+        "type": "int",
+        "description": "确认超时（秒）",
+        "hint": "超时视为取消，范围 5-600",
+        "default": 60
+      },
+      "require_for": {
+        "type": "list",
+        "description": "需要确认的操作",
+        "hint": "whole_ban 指「禁言 全体」，kick 指踢人",
+        "options": ["kick", "whole_ban"],
+        "default": ["kick", "whole_ban"]
+      },
+      "confirm_words": {
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "description": "确认词",
+        "default": ["同意", "确认", "yes"]
+      },
+      "cancel_words": {
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "description": "取消词",
+        "default": ["取消", "否", "no"]
+      }
+    }
+  },
+  "notify": {
+    "type": "object",
+    "description": "通知设置",
+    "items": {
+      "operation_receipt": {
+        "type": "bool",
+        "description": "操作回执发到触发群",
+        "hint": "执行禁言、踢人等操作后在群里回复结果",
+        "default": true
+      },
+      "receipt_to_manage_session": {
+        "type": "bool",
+        "description": "操作回执同时发到管理会话",
+        "hint": "开启后，管理操作记录会同时发送到该群所属群组的管理会话",
+        "default": false
+      }
+    }
+  },
+  "audit": {
+    "type": "object",
+    "description": "审计日志",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "记录审计日志",
+        "hint": "记录到插件数据目录下的 audit.jsonl",
+        "default": true
+      },
+      "retention_days": {
+        "type": "int",
+        "description": "保留天数",
+        "hint": "插件启动时清理超过该天数的记录，填 0 表示不清理",
+        "default": 30
+      }
+    }
+  },
+  "templates": {
+    "type": "object",
+    "description": "消息模板",
+    "hint": "占位符用花括号，例如 {target_name}。渲染失败会自动回退到默认文案",
+    "items": {
+      "ban_success": {
+        "type": "text",
+        "description": "禁言成功",
+        "hint": "可用占位符：{target_name} {target_id} {duration}",
+        "default": "已禁言 {target_name}({target_id}) {duration}"
+      },
+      "unban_success": {
+        "type": "text",
+        "description": "解禁成功",
+        "hint": "可用占位符：{target_name} {target_id}",
+        "default": "已解除 {target_name}({target_id}) 的禁言"
+      },
+      "whole_ban_on": {
+        "type": "text",
+        "description": "全群禁言已开启",
+        "default": "已开启全群禁言"
+      },
+      "whole_ban_off": {
+        "type": "text",
+        "description": "全群禁言已解除",
+        "default": "已解除全群禁言"
+      },
+      "whole_ban_timed": {
+        "type": "text",
+        "description": "全群禁言已开启（定时）",
+        "hint": "可用占位符：{duration}",
+        "default": "已开启全群禁言，将在 {duration} 后自动解除"
+      },
+      "kick_success": {
+        "type": "text",
+        "description": "踢人成功",
+        "hint": "可用占位符：{target_name} {target_id}",
+        "default": "已将 {target_name}({target_id}) 移出本群"
+      },
+      "recall_success": {
+        "type": "text",
+        "description": "撤回成功",
+        "default": "已撤回指定消息"
+      },
+      "notice_success": {
+        "type": "text",
+        "description": "群公告发送成功",
+        "default": "群公告已更新"
+      },
+      "notice_empty": {
+        "type": "text",
+        "description": "当前无群公告",
+        "default": "当前没有群公告"
+      },
+      "notice_unsupported": {
+        "type": "text",
+        "description": "协议端不支持读取群公告",
+        "default": "当前协议端不支持读取群公告"
+      },
+      "no_permission": {
+        "type": "text",
+        "description": "权限不足",
+        "hint": "可用占位符：{reason}",
+        "default": "你没有权限执行该操作：{reason}"
+      },
+      "no_target": {
+        "type": "text",
+        "description": "未指定目标",
+        "default": "请 @ 一个目标，或回复对方的消息后再执行本指令"
+      },
+      "bad_duration": {
+        "type": "text",
+        "description": "时长格式错误",
+        "default": "时长格式不正确，示例：10m、2h、1d、600"
+      },
+      "api_failed": {
+        "type": "text",
+        "description": "接口调用失败",
+        "hint": "可用占位符：{error}",
+        "default": "操作失败：{error}"
+      },
+      "api_unsupported": {
+        "type": "text",
+        "description": "协议端不支持该接口",
+        "default": "当前协议端不支持该操作，建议改用 NapCat 或 Lagrange"
+      },
+      "confirm_prompt": {
+        "type": "text",
+        "description": "二次确认提示",
+        "hint": "可用占位符：{summary} {timeout}",
+        "default": "即将执行：{summary}\n回复「同意」继续，回复「取消」放弃（{timeout} 秒内有效）"
+      },
+      "confirm_timeout": {
+        "type": "text",
+        "description": "确认超时",
+        "default": "操作已取消（等待确认超时）"
+      },
+      "confirm_cancelled": {
+        "type": "text",
+        "description": "操作已取消",
+        "default": "操作已取消"
+      },
+      "confirm_not_operator": {
+        "type": "text",
+        "description": "非操作者尝试确认",
+        "default": "只有发起该操作的人可以确认"
+      },
+      "group_unconfigured": {
+        "type": "text",
+        "description": "群未加入任何群组时的提示",
+        "default": "本群未加入任何群组，部分功能（共享黑名单、进群审核）不可用"
+      }
+    }
+  }
+}
