@@ -21,6 +21,7 @@ from astrbot.core.star.filter.command import GreedyStr
 
 from .core.args import parse_duration_token, parse_target_args
 from .core.audit import AuditLog
+from .core.blacklist import BlacklistStore
 from .core.config import (
     CAPABILITY_KEYS,
     DEFAULT_BAN_DURATION,
@@ -34,9 +35,11 @@ from .core.config import (
     normalize_permission_level,
     normalize_words,
     parse_duration,
+    resolve_blacklist_scope,
 )
 from .core.confirm import ConfirmManager, PendingAction
 from .core.messages import render_template
+from .core.notify import Notifier
 from .core.onebot import ActionResult, OneBotClient
 from .core.permission import (
     PermissionContext,
@@ -132,6 +135,8 @@ class QQAdminPlugin(Star):
         audit_conf = audit_conf if isinstance(audit_conf, dict) else {}
         confirm_conf = config.get("confirm")
         confirm_conf = confirm_conf if isinstance(confirm_conf, dict) else {}
+        blacklist_conf = config.get("blacklist")
+        blacklist_conf = blacklist_conf if isinstance(blacklist_conf, dict) else {}
 
         self.receipt_enabled = bool(notify.get("operation_receipt", True))
         self.receipt_to_manage_session = bool(
@@ -139,6 +144,15 @@ class QQAdminPlugin(Star):
         )
         self._audit_enabled = bool(audit_conf.get("enabled", True))
         self._audit_retention_days = int(audit_conf.get("retention_days", 30))
+
+        self._blacklist_enabled = bool(blacklist_conf.get("enabled", True))
+        self.blacklist_default_reason = (
+            str(blacklist_conf.get("default_reason") or "未填写原因").strip()
+            or "未填写原因"
+        )
+        self._blacklist_block_message = bool(
+            blacklist_conf.get("block_message", False),
+        )
 
         self._confirm_enabled = bool(confirm_conf.get("enabled", True))
         self._confirm_timeout = max(5, int(confirm_conf.get("timeout", 60)))
@@ -173,6 +187,13 @@ class QQAdminPlugin(Star):
             data_dir,
             enabled=self._audit_enabled,
             retention_days=self._audit_retention_days,
+        )
+        self.blacklist = BlacklistStore(data_dir, enabled=self._blacklist_enabled)
+        self.notifier = Notifier(
+            self.context,
+            self.templates,
+            receipt_enabled=self.receipt_enabled,
+            receipt_to_manage_session=self.receipt_to_manage_session,
         )
         self._build_confirm_manager()
 
@@ -985,6 +1006,7 @@ class QQAdminPlugin(Star):
         else:
             lines.append(f"  所属群组：无（{self._text('group_unconfigured')}）")
         lines.append(f"  已配置群组总数：{len(self.group_sets)}")
+        lines.append(f"  黑名单条目：{self.blacklist.count(self._scope(group_id))}")
 
         conflicted = self._conflicting_groups()
         if conflicted:
@@ -992,6 +1014,240 @@ class QQAdminPlugin(Star):
 
         async for item in self._reply(event, "\n".join(lines)):
             yield item
+
+    # ------------------------------------------------------------------ #
+    #  Commands: blacklist
+    # ------------------------------------------------------------------ #
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("拉黑", alias={"blacklist"})
+    async def blacklist_add(
+        self,
+        event: AstrMessageEvent,
+        args: GreedyStr = "",
+    ) -> AsyncGenerator[Any, None]:
+        """将成员加入本群组的黑名单，原因会记入导出表格。
+
+        Args:
+            event: 消息事件。
+            args: 后续参数，形如「@某人 发广告 7d」。允许省略。
+        """
+        if self._should_skip(event):
+            return
+        group_id = str(event.get_group_id())
+        operator = await self._permission_context(event)
+
+        allowed, deny_reason = check_capability(
+            operator,
+            self.permission_settings,
+            "blacklist",
+        )
+        if not allowed:
+            async for item in self._reply(
+                event,
+                self._text("no_permission", reason=deny_reason),
+            ):
+                yield item
+            return
+
+        parsed = parse_target_args(
+            str(args or "").split(),
+            extract_at_targets(event),
+        )
+        if not parsed.targets:
+            async for item in self._reply(event, self._text("no_target")):
+                yield item
+            return
+        if parsed.unknown_duration:
+            async for item in self._reply(event, self._text("bad_duration")):
+                yield item
+            return
+
+        duration = parsed.duration if parsed.duration_specified else 0
+        reason = parsed.reason or self.blacklist_default_reason
+        scope = self._scope(group_id)
+
+        lines: list[str] = []
+        for user_id in parsed.targets:
+            nickname = await self._resolve_member_name(event, group_id, user_id)
+            entry = self.blacklist.add(
+                scope,
+                user_id,
+                reason=reason,
+                operator=operator.user_id,
+                duration=duration or 0,
+                nickname=nickname,
+            )
+            lines.append(
+                self._text(
+                    "blacklist_added",
+                    target_name=nickname,
+                    target_id=user_id,
+                    reason=reason,
+                    duration=(
+                        format_duration(duration) if entry.is_temporary else "永久"
+                    ),
+                ),
+            )
+            self._log_action(
+                "blacklist_add",
+                operator,
+                target=user_id,
+                group_id=group_id,
+                scope=scope,
+                reason=reason,
+                duration=duration or 0,
+            )
+
+        async for item in self._reply(event, "\n".join(lines)):
+            yield item
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("解除拉黑", alias={"unblack"})
+    async def blacklist_remove(
+        self,
+        event: AstrMessageEvent,
+        args: GreedyStr = "",
+    ) -> AsyncGenerator[Any, None]:
+        """将成员移出本群组的黑名单。
+
+        Args:
+            event: 消息事件。
+            args: 后续参数，形如「@某人」。允许省略。
+        """
+        if self._should_skip(event):
+            return
+        group_id = str(event.get_group_id())
+        operator = await self._permission_context(event)
+
+        allowed, deny_reason = check_capability(
+            operator,
+            self.permission_settings,
+            "blacklist",
+        )
+        if not allowed:
+            async for item in self._reply(
+                event,
+                self._text("no_permission", reason=deny_reason),
+            ):
+                yield item
+            return
+
+        parsed = parse_target_args(
+            str(args or "").split(),
+            extract_at_targets(event),
+        )
+        if not parsed.targets:
+            async for item in self._reply(event, self._text("no_target")):
+                yield item
+            return
+
+        scope = self._scope(group_id)
+        lines: list[str] = []
+        for user_id in parsed.targets:
+            name = await self._resolve_member_name(event, group_id, user_id)
+            if self.blacklist.remove(scope, user_id):
+                lines.append(
+                    self._text(
+                        "blacklist_removed",
+                        target_name=name,
+                        target_id=user_id,
+                    ),
+                )
+                self._log_action(
+                    "blacklist_remove",
+                    operator,
+                    target=user_id,
+                    group_id=group_id,
+                    scope=scope,
+                )
+            else:
+                lines.append(
+                    self._text(
+                        "blacklist_not_found",
+                        target_name=name,
+                        target_id=user_id,
+                    ),
+                )
+
+        async for item in self._reply(event, "\n".join(lines)):
+            yield item
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("黑名单", alias={"blist"})
+    async def blacklist_list(
+        self,
+        event: AstrMessageEvent,
+    ) -> AsyncGenerator[Any, None]:
+        """查看本群组共享的黑名单。
+
+        Args:
+            event: 消息事件。
+        """
+        if self._should_skip(event):
+            return
+        group_id = str(event.get_group_id())
+        operator = await self._permission_context(event)
+
+        allowed, deny_reason = check_capability(
+            operator,
+            self.permission_settings,
+            "query",
+        )
+        if not allowed:
+            async for item in self._reply(
+                event,
+                self._text("no_permission", reason=deny_reason),
+            ):
+                yield item
+            return
+
+        scope = self._scope(group_id)
+        entries = self.blacklist.list_entries(scope)
+        if not entries:
+            async for item in self._reply(
+                event,
+                self._text("blacklist_empty", scope=scope),
+            ):
+                yield item
+            return
+
+        group_set = find_group_set(self.group_sets, group_id)
+        header = self._text(
+            "blacklist_header",
+            scope=scope,
+            count=len(entries),
+            groups=len(group_set["group_ids"]) if group_set else 1,
+        )
+        lines = [header]
+        for index, entry in enumerate(entries, start=1):
+            name = entry.nickname or entry.user_id
+            expiry = (
+                format_duration(int(entry.expires_at - entry.created_at))
+                if entry.is_temporary
+                else "永久"
+            )
+            lines.append(
+                f"{index}. {name}({entry.user_id}) | {entry.reason} | {expiry}",
+            )
+        async for item in self._reply(event, "\n".join(lines)):
+            yield item
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers
+    # ------------------------------------------------------------------ #
+
+    def _scope(self, group_id: str) -> str:
+        """Resolve the blacklist bucket for a group.
+
+        Args:
+            group_id: QQ group id.
+
+        Returns:
+            The shared bucket key when the group belongs to a set, otherwise a
+            bucket private to the group.
+        """
+        return resolve_blacklist_scope(self.group_sets, group_id)
 
     def _conflicting_groups(self) -> list[str]:
         """List group ids appearing in more than one group set.

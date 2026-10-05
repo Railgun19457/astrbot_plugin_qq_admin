@@ -170,6 +170,29 @@
       }
     }
   },
+  "blacklist": {
+    "type": "object",
+    "description": "黑名单",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用黑名单",
+        "default": true
+      },
+      "default_reason": {
+        "type": "string",
+        "description": "默认拉黑原因",
+        "hint": "指令或 LLM 未提供原因时使用的占位文案。拉黑原因会写入黑名单数据并出现在导出的表格中",
+        "default": "未填写原因"
+      },
+      "block_message": {
+        "type": "bool",
+        "description": "黑名单成员发言时自动撤回",
+        "hint": "默认关闭。默认行为是「拉黑仅作记录与进群审核拦截」，不主动处理已入群成员",
+        "default": false
+      }
+    }
+  },
   "confirm": {
     "type": "object",
     "description": "高危操作确认",
@@ -315,6 +338,36 @@
         "type": "text",
         "description": "未指定目标",
         "default": "请 @ 一个目标，或回复对方的消息后再执行本指令"
+      },
+      "blacklist_added": {
+        "type": "text",
+        "description": "拉黑成功",
+        "hint": "可用占位符：{target_name} {target_id} {reason} {duration}",
+        "default": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}\n期限：{duration}"
+      },
+      "blacklist_removed": {
+        "type": "text",
+        "description": "移出黑名单",
+        "hint": "可用占位符：{target_name} {target_id}",
+        "default": "已将 {target_name}({target_id}) 移出黑名单"
+      },
+      "blacklist_not_found": {
+        "type": "text",
+        "description": "目标不在黑名单",
+        "hint": "可用占位符：{target_name} {target_id}",
+        "default": "{target_name}({target_id}) 不在黑名单中"
+      },
+      "blacklist_empty": {
+        "type": "text",
+        "description": "黑名单为空",
+        "hint": "可用占位符：{scope}",
+        "default": "黑名单（{scope}）当前为空"
+      },
+      "blacklist_header": {
+        "type": "text",
+        "description": "黑名单列表头部",
+        "hint": "可用占位符：{scope} {count} {groups}",
+        "default": "黑名单（{scope}）共 {count} 人，覆盖 {groups} 个群"
       },
       "bad_duration": {
         "type": "text",

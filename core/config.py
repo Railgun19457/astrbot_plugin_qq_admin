@@ -258,9 +258,9 @@ def find_group_set(
 
 
 def blacklist_scope(group_id: str) -> str:
-    """Return the blacklist bucket key for a group.
+    """Return the fallback blacklist bucket key for a group.
 
-    Groups that belong to no configured set fall back to their own id so that
+    Only used when the group belongs to no configured set, so that
     blacklisting keeps working on unconfigured groups.
 
     Args:
@@ -270,6 +270,29 @@ def blacklist_scope(group_id: str) -> str:
         The bucket key used by the blacklist store.
     """
     return group_id or "unknown"
+
+
+def resolve_blacklist_scope(
+    group_sets: list[dict[str, Any]],
+    group_id: str,
+) -> str:
+    """Resolve the blacklist bucket a group reads from and writes to.
+
+    Groups belonging to a configured set share that set's bucket, which is what
+    implements the "shared blacklist across a group set" behaviour. Groups
+    outside every set get a private bucket instead of an error.
+
+    Args:
+        group_sets: Normalized group set definitions.
+        group_id: QQ group id.
+
+    Returns:
+        The bucket key; the group id itself when the group is unconfigured.
+    """
+    group_set = find_group_set(group_sets, group_id)
+    if group_set:
+        return str(group_set["name"])
+    return blacklist_scope(group_id)
 
 
 # ------------------------------------------------------------------ #
