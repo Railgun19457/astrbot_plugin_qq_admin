@@ -193,6 +193,89 @@
       }
     }
   },
+  "join_review": {
+    "type": "object",
+    "description": "自动进群审核",
+    "hint": "仅对已加入群组的群生效。未入组的群会跳过自动审核并在日志中记录",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用自动审核",
+        "default": false
+      },
+      "blacklist_reject": {
+        "type": "bool",
+        "description": "黑名单成员自动拒绝",
+        "hint": "申请人处于该群组的黑名单中时直接拒绝",
+        "default": true
+      },
+      "keyword_allow": {
+        "type": "bool",
+        "description": "答案匹配关键词时自动放行",
+        "default": true
+      },
+      "keyword_rules": {
+        "type": "template_list",
+        "description": "关键词规则",
+        "hint": "按顺序逐条匹配，命中任意关键词即放行。group_id 留空表示对该群组内所有群生效",
+        "templates": {
+          "rule": {
+            "name": "关键词规则",
+            "display_item": "group_id",
+            "items": {
+              "group_id": {
+                "type": "string",
+                "description": "群号",
+                "hint": "留空 = 该配置内所有群通用",
+                "default": ""
+              },
+              "keywords": {
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "description": "关键词",
+                "hint": "申请答案中命中任意一个即视为匹配，不区分大小写",
+                "default": []
+              },
+              "question_type": {
+                "type": "string",
+                "description": "适用的申请类型",
+                "options": ["any", "add", "invite"],
+                "default": "any"
+              }
+            }
+          }
+        }
+      },
+      "min_account_level": {
+        "type": "int",
+        "description": "最低 QQ 等级",
+        "hint": "0 表示不检查。需要协议端支持 _get_group_member_info 的 level 字段，不支持时会跳过校验并记录一次警告",
+        "default": 0
+      },
+      "manual_confirm": {
+        "type": "bool",
+        "description": "白名单外转人工确认",
+        "hint": "未命中任何规则时，把申请转发到管理会话等待人工同意/拒绝",
+        "default": true
+      },
+      "unattended_action": {
+        "type": "string",
+        "description": "无人值守时的默认行为",
+        "hint": "仅在关闭「转人工确认」时生效。hold=保持待审（推荐），reject=直接拒绝，approve=直接放行",
+        "options": ["hold", "reject", "approve"],
+        "default": "hold",
+        "obvious_hint": true
+      },
+      "reject_reason": {
+        "type": "string",
+        "description": "拒绝理由",
+        "hint": "展示给申请人的拒绝原因",
+        "default": "未通过进群审核"
+      }
+    }
+  },
   "confirm": {
     "type": "object",
     "description": "高危操作确认",
@@ -410,6 +493,35 @@
         "type": "text",
         "description": "群未加入任何群组时的提示",
         "default": "本群未加入任何群组，部分功能（共享黑名单、进群审核）不可用"
+      },
+      "review_new_request": {
+        "type": "text",
+        "description": "进群申请通知",
+        "hint": "可用占位符：{group_id} {user_id} {comment} {sub_type} {decision} {reason}",
+        "default": "【进群申请】群 {group_id}\n申请人：{user_id}\n答案：{comment}\n处理：{decision}（{reason}）"
+      },
+      "review_header": {
+        "type": "text",
+        "description": "待审核列表头部",
+        "hint": "可用占位符：{count}",
+        "default": "待审核的进群申请共 {count} 条："
+      },
+      "review_empty": {
+        "type": "text",
+        "description": "无待审核申请",
+        "default": "当前没有待审核的进群申请"
+      },
+      "review_bad_index": {
+        "type": "text",
+        "description": "审核编号越界",
+        "hint": "可用占位符：{count}",
+        "default": "编号超出范围（当前共 {count} 条）"
+      },
+      "review_decided": {
+        "type": "text",
+        "description": "人工审核完成",
+        "hint": "可用占位符：{action} {user_id} {group_id}",
+        "default": "已{action} {user_id} 加入群 {group_id} 的申请"
       }
     }
   }

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -47,6 +48,12 @@ from .core.permission import (
     build_permission_context,
     check_capability,
 )
+from .core.review import (
+    PendingReviewStore,
+    evaluate,
+    normalize_keyword_rules,
+    parse_request_event,
+)
 from .core.utils import (
     extract_at_targets,
     extract_reply_message_id,
@@ -58,6 +65,21 @@ SUPPORTED_PLATFORM = "aiocqhttp"
 
 #: Maximum number of members rendered by the ``/群成员`` listing.
 MEMBER_PAGE_SIZE = 20
+
+
+@dataclass
+class _SimpleDecision:
+    """Minimal decision holder used when an operator resolves a request.
+
+    Attributes:
+        action: ``"approve"`` or ``"reject"``.
+        reason: Machine readable cause.
+        detail: Human readable explanation passed to the notification.
+    """
+
+    action: str
+    reason: str
+    detail: str = ""
 
 
 class QQAdminPlugin(Star):
@@ -154,6 +176,30 @@ class QQAdminPlugin(Star):
             blacklist_conf.get("block_message", False),
         )
 
+        review_conf = config.get("join_review")
+        review_conf = review_conf if isinstance(review_conf, dict) else {}
+        self._review_enabled = bool(review_conf.get("enabled", False))
+        self._review_keyword_allow = bool(review_conf.get("keyword_allow", True))
+        self._review_blacklist_reject = bool(review_conf.get("blacklist_reject", True))
+        self._review_min_level = max(
+            0, int(review_conf.get("min_account_level", 0) or 0)
+        )
+        self._review_manual_confirm = bool(review_conf.get("manual_confirm", True))
+        self._review_unattended = str(
+            review_conf.get("unattended_action") or "hold",
+        ).strip()
+        self._review_reject_reason = (
+            str(
+                review_conf.get("reject_reason") or "未通过进群审核",
+            ).strip()
+            or "未通过进群审核"
+        )
+        self._review_rules = normalize_keyword_rules(review_conf.get("keyword_rules"))
+        if not self._review_keyword_allow:
+            self._review_rules = []
+
+        self._level_unsupported_warned = False
+
         self._confirm_enabled = bool(confirm_conf.get("enabled", True))
         self._confirm_timeout = max(5, int(confirm_conf.get("timeout", 60)))
         self._confirm_words = normalize_words(
@@ -189,6 +235,7 @@ class QQAdminPlugin(Star):
             retention_days=self._audit_retention_days,
         )
         self.blacklist = BlacklistStore(data_dir, enabled=self._blacklist_enabled)
+        self.pending_reviews = PendingReviewStore(data_dir)
         self.notifier = Notifier(
             self.context,
             self.templates,
@@ -1262,6 +1309,321 @@ class QQAdminPlugin(Star):
         return sorted(gid for gid, count in seen.items() if count > 1)
 
     # ------------------------------------------------------------------ #
+    #  Join request review
+    # ------------------------------------------------------------------ #
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_raw_event(self, event: AstrMessageEvent) -> None:
+        """Handle OneBot request events (group join applications).
+
+        Request events carry an empty message chain, so they cannot be matched
+        by a command filter and are inspected through ``raw_message`` instead.
+
+        This handler returns nothing on purpose: yielding would send a message
+        into an empty session, and calling ``stop_event`` would block other
+        plugins from seeing legitimate traffic. ``should_call_llm(False)`` is
+        what keeps the empty request from triggering a pointless LLM call.
+
+        Args:
+            event: The incoming adapter event.
+        """
+        if not self.enabled or not self._review_enabled:
+            return
+        if event.get_platform_name() != SUPPORTED_PLATFORM:
+            return
+
+        raw = getattr(event.message_obj, "raw_message", None)
+        request = parse_request_event(raw)
+        if request is None:
+            return
+
+        event.should_call_llm(False)
+        try:
+            await self._process_join_request(event, request)
+        except Exception as exc:  # noqa: BLE001 - a bad request must not crash
+            logger.exception(f"[QQAdmin] 处理进群申请失败：{exc}")
+
+    async def _process_join_request(
+        self,
+        event: AstrMessageEvent,
+        request: Any,
+    ) -> None:
+        """Evaluate a join request and act on the decision.
+
+        Args:
+            event: Event carrying the request.
+            request: Parsed join request.
+        """
+        from .core.review import JoinRequest
+
+        assert isinstance(request, JoinRequest)
+
+        group_set = find_group_set(self.group_sets, request.group_id)
+        if group_set is None:
+            logger.info(
+                f"[QQAdmin] 群 {request.group_id} 未加入任何群组，跳过自动审核",
+            )
+            return
+
+        scope = self._scope(request.group_id)
+        is_blacklisted = (
+            self._review_blacklist_reject
+            and self.blacklist.is_blacklisted(
+                scope,
+                request.user_id,
+            )
+        )
+        level = await self._account_level(event, request)
+
+        decision = evaluate(
+            request,
+            is_blacklisted=is_blacklisted,
+            account_level=level,
+            min_account_level=self._review_min_level,
+            keyword_rules=self._review_rules,
+            manual_confirm=self._review_manual_confirm,
+            unattended_action=self._review_unattended,
+        )
+        logger.info(
+            f"[QQAdmin] 进群申请 群{request.group_id} 用户{request.user_id} "
+            f"→ {decision.action}（{decision.reason}：{decision.detail}）",
+        )
+
+        if decision.action == "hold":
+            self.pending_reviews.add(request)
+        else:
+            await self._apply_decision(event, request, decision.action, decision.reason)
+
+        await self._notify_review(event, group_set, request, decision)
+
+    async def _account_level(
+        self,
+        event: AstrMessageEvent,
+        request: Any,
+    ) -> int | None:
+        """Look up an applicant's QQ level.
+
+        Args:
+            event: Event providing the OneBot connection.
+            request: The join request.
+
+        Returns:
+            The level, or ``None`` when the protocol implementation does not
+            expose it (the ``level`` field comes from the private
+            ``_get_group_member_info`` action).
+        """
+        if self._review_min_level <= 0:
+            return None
+
+        result = await self.client.call_action(
+            event,
+            "_get_group_member_info",
+            group_id=request.group_id,
+            user_id=request.user_id,
+            no_cache=True,
+        )
+        if not result.ok or not isinstance(result.data, dict):
+            if not self._level_unsupported_warned:
+                self._level_unsupported_warned = True
+                logger.warning(
+                    "[QQAdmin] 协议端未提供 QQ 等级信息，已跳过等级校验",
+                )
+            return None
+
+        raw_level = result.data.get("level")
+        try:
+            return int(raw_level)
+        except (TypeError, ValueError):
+            return None
+
+    async def _apply_decision(
+        self,
+        event: AstrMessageEvent,
+        request: Any,
+        action: str,
+        reason: str,
+    ) -> bool:
+        """Approve or reject a join request through the protocol.
+
+        Args:
+            event: Event providing the OneBot connection.
+            request: The join request.
+            action: ``"approve"`` or ``"reject"``.
+            reason: Machine readable cause, recorded in the audit log.
+
+        Returns:
+            ``True`` when the protocol accepted the decision.
+        """
+        if action not in ("approve", "reject"):
+            return False
+
+        approve = action == "approve"
+        result = await self.client.set_group_add_request(
+            event,
+            request.flag,
+            approve=approve,
+            reason="" if approve else self._review_reject_reason,
+        )
+        self.audit.log(
+            f"review_{action}",
+            "system",
+            target=request.user_id,
+            group_id=request.group_id,
+            scope=self._scope(request.group_id),
+            result="ok" if result.ok else "failed",
+            error=result.error,
+            reason=reason,
+            comment=request.comment[:50],
+        )
+        if result.ok:
+            self.pending_reviews.remove(request.flag)
+        else:
+            logger.warning(
+                f"[QQAdmin] 处理进群申请失败（{request.user_id}@{request.group_id}）："
+                f"{result.error}",
+            )
+        return result.ok
+
+    async def _notify_review(
+        self,
+        event: AstrMessageEvent,
+        group_set: dict[str, Any],
+        request: Any,
+        decision: Any,
+    ) -> None:
+        """Send the review notification to the manage session.
+
+        Args:
+            event: Event providing the platform instance id.
+            group_set: Owning group set.
+            request: The join request.
+            decision: The decision that was applied (or held).
+        """
+        action_label = {
+            "approve": "已自动放行",
+            "reject": "已自动拒绝",
+            "hold": "待人工确认",
+        }.get(decision.action, decision.action)
+
+        # The template is keyed on the request content; the decision is
+        # appended so an operator sees what the bot already did.
+        text = render_template(
+            self.templates,
+            "review_new_request",
+            group_id=request.group_id,
+            user_id=request.user_id,
+            user_name=request.user_id,
+            comment=request.comment or "（无）",
+            sub_type=request.sub_type,
+            decision=action_label,
+            reason=decision.detail or decision.reason,
+        )
+        target = self.notifier.resolve_target(event, group_set)
+        await self.notifier.send_to_session(target, text)
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("审核", alias={"review"})
+    async def review_command(
+        self,
+        event: AstrMessageEvent,
+        args: GreedyStr = "",
+    ) -> AsyncGenerator[Any, None]:
+        """处理待审核的进群申请：审核 / 审核同意 <编号> / 审核拒绝 <编号>。
+
+        Args:
+            event: 消息事件。
+            args: 子命令与编号。允许省略。
+        """
+        if self._should_skip(event):
+            return
+        operator = await self._permission_context(event)
+
+        allowed, deny_reason = check_capability(
+            operator,
+            self.permission_settings,
+            "export",
+        )
+        if not allowed:
+            async for item in self._reply(
+                event,
+                self._text("no_permission", reason=deny_reason),
+            ):
+                yield item
+            return
+
+        tokens = str(args or "").split()
+        pending = self.pending_reviews.load_all()
+
+        if not tokens or tokens[0] in ("列表", "list"):
+            if not pending:
+                async for item in self._reply(event, self._text("review_empty")):
+                    yield item
+                return
+            lines = [self._text("review_header", count=len(pending))]
+            for index, request in enumerate(pending, start=1):
+                lines.append(
+                    f"{index}. 群{request.group_id} "
+                    f"{request.user_id} | {request.comment or '（无）'}",
+                )
+            lines.append("回复「审核同意 <编号>」或「审核拒绝 <编号>」处理")
+            async for item in self._reply(event, "\n".join(lines)):
+                yield item
+            return
+
+        verb = tokens[0]
+        if verb not in ("同意", "拒绝") or len(tokens) < 2:
+            async for item in self._reply(
+                event,
+                "用法：审核 / 审核列表 / 审核同意 <编号> / 审核拒绝 <编号>",
+            ):
+                yield item
+            return
+
+        if not tokens[1].isdigit():
+            async for item in self._reply(event, "编号必须是数字"):
+                yield item
+            return
+
+        index = int(tokens[1])
+        if not 1 <= index <= len(pending):
+            async for item in self._reply(
+                event,
+                self._text("review_bad_index", count=len(pending)),
+            ):
+                yield item
+            return
+
+        request = pending[index - 1]
+        action = "approve" if verb == "同意" else "reject"
+        ok = await self._apply_decision(event, request, action, "manual")
+        if ok:
+            group_set = find_group_set(self.group_sets, request.group_id)
+            summary = self._text(
+                "review_decided",
+                user_id=request.user_id,
+                group_id=request.group_id,
+                action="已同意" if action == "approve" else "已拒绝",
+            )
+            async for item in self._reply(event, summary):
+                yield item
+            if group_set:
+                await self._notify_review(
+                    event,
+                    group_set,
+                    request,
+                    _SimpleDecision(
+                        action, "manual", f"管理员 {operator.user_id} 处理"
+                    ),
+                )
+        else:
+            async for item in self._reply(
+                event,
+                self._text("api_failed", error="协议端拒绝了该操作"),
+            ):
+                yield item
+
+    # ------------------------------------------------------------------ #
     #  Failure rendering
     # ------------------------------------------------------------------ #
 
@@ -1296,6 +1658,10 @@ class QQAdminPlugin(Star):
         server-side timer to restore. Any mute still running therefore stays on
         until an operator lifts it manually; a warning is logged to make that
         visible.
+
+        Pending join requests are intentionally left on disk: the protocol token
+        usually outlives a reload, so they can still be resolved through
+        ``/审核`` afterwards.
         """
         for group_id, task in list(self._whole_ban_tasks.items()):
             if not task.done():
@@ -1306,3 +1672,8 @@ class QQAdminPlugin(Star):
                 )
         self._whole_ban_tasks.clear()
         self.client.invalidate_member_cache()
+        if len(self.pending_reviews):
+            logger.info(
+                f"[QQAdmin] 插件卸载时仍有 {len(self.pending_reviews)} 条待审核申请，"
+                "已保留在 pending_reviews.json",
+            )
