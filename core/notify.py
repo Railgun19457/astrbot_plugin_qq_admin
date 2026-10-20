@@ -1,13 +1,11 @@
 """Notification routing.
 
-A group set may declare a *manage session* (a group or a private chat) that
-receives review notifications and optionally the operation receipts. When it is
-not configured, notifications fall back to the group the action happened in.
-
-Configuration writes the session in a friendly ``group:123456`` form, but
-AstrBot routes by ``unified_msg_origin``, which looks like
-``aiocqhttp_1:GroupMessage:123456``. The platform *instance id* is part of that
-string and cannot be hard-coded, so it is always taken from the live event.
+A group set may declare a *manage session* that receives review notifications
+and optionally the operation receipts. The value is a ``unified_msg_origin``
+(UMO) such as ``aiocqhttp:GroupMessage:123456``, which can be copied from the
+``/sid`` command in the target session. The UMO already embeds the message
+type, so group chats and private chats are configured the same way and the
+platform instance id does not have to be hard-coded.
 """
 
 from __future__ import annotations
@@ -22,91 +20,42 @@ if TYPE_CHECKING:
     from astrbot.api.star import Context
 
 
-#: Keys accepted in the ``manage_session`` configuration field.
-_SESSION_KINDS: dict[str, str] = {
-    "group": "GroupMessage",
-    "private": "FriendMessage",
-}
-
-
 @dataclass
 class SessionTarget:
     """A resolved destination for a proactive message.
 
     Attributes:
         value: ``unified_msg_origin`` string, ready for ``context.send_message``.
-        kind: ``"group"`` or ``"private"``.
-        session_id: Raw group id or QQ number.
     """
 
     value: str
-    kind: str
-    session_id: str
 
     def __str__(self) -> str:
         return self.value
 
 
-def parse_manage_session(raw: str) -> tuple[str, str] | None:
-    """Parse the ``manage_session`` configuration value.
+def parse_manage_session(raw: str) -> str | None:
+    """Validate the ``manage_session`` configuration value.
 
     Args:
-        raw: Raw configuration text, e.g. ``group:123456``.
+        raw: Raw configuration text, expected to be a UMO such as
+            ``aiocqhttp:GroupMessage:123456``.
 
     Returns:
-        ``(kind, session_id)`` with ``kind`` either ``"group"`` or
-        ``"private"``, or ``None`` when the value is empty or malformed.
+        The normalized UMO, or ``None`` when the value is empty or malformed.
     """
     text = str(raw or "").strip()
     if not text:
         return None
 
-    if ":" not in text:
-        # Bare numbers are ambiguous; default to a group rather than guessing.
-        if text.isdigit():
-            return "group", text
-        logger.warning(f"[QQAdmin] 无法解析管理会话配置：{text}")
+    parts = [part.strip() for part in text.split(":")]
+    if len(parts) != 3 or not all(parts):
+        logger.warning(
+            f"[QQAdmin] 管理会话配置不是合法的 UMO：{text}。"
+            "请在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456",
+        )
         return None
-
-    kind_raw, _, session_id = text.partition(":")
-    kind = kind_raw.strip().lower()
-    session_id = session_id.strip()
-    if kind not in _SESSION_KINDS or not session_id:
-        logger.warning(f"[QQAdmin] 无法解析管理会话配置：{text}")
-        return None
-    return kind, session_id
-
-
-def build_umo(
-    event: AstrMessageEvent,
-    kind: str,
-    session_id: str,
-) -> str | None:
-    """Build a ``unified_msg_origin`` for an event's platform.
-
-    Args:
-        event: Any event from the target platform, used to read the platform
-            instance id.
-        kind: ``"group"`` or ``"private"``.
-        session_id: Group id or QQ number.
-
-    Returns:
-        The umo string, or ``None`` when the platform id is unavailable.
-    """
-    message_type = _SESSION_KINDS.get(kind)
-    if not message_type:
-        return None
-
-    platform_id = ""
-    getter = getattr(event, "get_platform_id", None)
-    if callable(getter):
-        platform_id = str(getter() or "")
-    if not platform_id:
-        platform_id = str(getattr(event, "get_platform_name", lambda: "")() or "")
-    if not platform_id:
-        logger.warning("[QQAdmin] 无法确定平台实例 ID，通知未发送")
-        return None
-    return f"{platform_id}:{message_type}:{session_id}"
+    return ":".join(parts)
 
 
 class Notifier:
@@ -155,7 +104,7 @@ class Notifier:
         """Resolve where a group-set notification should go.
 
         Args:
-            event: Event providing the platform instance id.
+            event: Event whose session is used as the fallback destination.
             group_set: Owning group set, or ``None`` when the group is
                 unconfigured.
 
@@ -164,17 +113,12 @@ class Notifier:
             originating group as a fallback.
         """
         if group_set:
-            parsed = parse_manage_session(group_set.get("manage_session", ""))
-            if parsed:
-                kind, session_id = parsed
-                umo = build_umo(event, kind, session_id)
-                if umo:
-                    return SessionTarget(umo, kind, session_id)
+            umo = parse_manage_session(group_set.get("manage_session", ""))
+            if umo:
+                return SessionTarget(umo)
 
         return SessionTarget(
             value=str(getattr(event, "unified_msg_origin", "") or ""),
-            kind="group",
-            session_id=str(event.get_group_id() or ""),
         )
 
     async def send_to_session(

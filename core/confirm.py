@@ -8,6 +8,7 @@ any scheduled follow-up (the whole-group mute timer) when the user declines.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -129,7 +130,8 @@ class ConfirmManager:
             for an explicit rejection, ``"timeout"`` when nobody answered in
             time, or ``"error"`` when the waiter itself failed, so the caller
             can tell the group why nothing happened. Only ``"confirmed"`` means
-            the action may proceed.
+            the action may proceed. The timeout and error notices are sent from
+            here, so callers only have to report a rejection.
         """
         operator_id = operator.user_id
         confirm_words = self._confirm_words
@@ -174,12 +176,32 @@ class ConfirmManager:
             controller.stop()
 
         try:
-            await _waiter(event)
-        except TimeoutError:
+            # The waiter enforces its own timeout; the outer wait_for is a
+            # safety net so a stuck waiter cannot leave the caller hanging
+            # without telling anyone.
+            await asyncio.wait_for(_waiter(event), timeout=self._timeout + 5)
+        except asyncio.TimeoutError:
             logger.info("[QQAdmin] 二次确认超时，操作已取消")
+            await self._send_notice(event, "confirm_timeout")
             return "timeout"
         except Exception as exc:  # noqa: BLE001 - confirmation must not crash
             logger.warning(f"[QQAdmin] 二次确认过程出错：{exc}")
+            await self._send_notice(event, "confirm_cancelled")
             return "error"
 
         return "confirmed" if decision and decision[0] else "cancelled"
+
+    async def _send_notice(self, event: AstrMessageEvent, key: str) -> None:
+        """Send a template message for an outcome that happened without input.
+
+        Args:
+            event: Event whose session receives the notice.
+            key: Template key to render.
+        """
+        text = render_template(self._templates, key)
+        if not text:
+            return
+        try:
+            await event.send(event.plain_result(text))
+        except Exception as exc:  # noqa: BLE001 - never break the caller
+            logger.warning(f"[QQAdmin] 发送二次确认结果失败：{exc}")

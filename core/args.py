@@ -1,16 +1,21 @@
 """Command argument parsing.
 
-The target syntax is ``<target> [duration] [reason...]`` where the duration and
-reason are both optional. Because the duration is optional, it cannot be bound
-to a fixed position: ``禁言 @某人 刷屏`` legitimately omits it. This module
-therefore scans the remaining tokens, treats the first duration-like token as
-the duration, and everything else as the reason.
+The target syntax is ``<target> [duration] [reason...]``; only the target is
+required and the tokens may appear in any order (``禁言 10m @某人 刷屏`` and
+``禁言 @某人 刷屏 10m`` are equivalent). This module therefore classifies the
+tokens instead of binding them to fixed positions:
+
+1. a token with a unit suffix (``10m``, ``2h``, ``1d``) is always a duration;
+2. the first QQ-like token is the target when no ``@`` target exists;
+3. a remaining bare number is a duration when a target is already known, and
+   otherwise becomes the target itself.
 
 Kept as pure functions so the rules can be verified without a live platform.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .config import parse_duration
@@ -53,7 +58,16 @@ def parse_target_args(
         A :class:`TargetArgs` describing the parsed intent. ``targets`` may be
         empty when the user supplied neither an ``@`` nor a QQ number.
     """
-    remaining = [token for token in tokens if token]
+    # ``message_str`` renders every non-bot @ segment as ``@name(qq)``, so the
+    # mention text arrives as ordinary argument tokens. Strip those segments
+    # before parsing so a mention never leaks into the reason recorded in the
+    # audit log. Matching on the QQ id also removes the fragments of nicknames
+    # that contain spaces.
+    text = " ".join(token for token in tokens if token)
+    if at_targets:
+        ids = "|".join(re.escape(target) for target in at_targets)
+        text = re.sub(rf"@.*?\((?:{ids})\)", " ", text)
+    remaining = text.split()
     targets = list(at_targets)
 
     # Drop hand-typed QQ numbers that duplicate an already known target, so a
@@ -61,6 +75,20 @@ def parse_target_args(
     for target in targets:
         if target in remaining:
             remaining.remove(target)
+
+    # A token with a unit suffix is unambiguously a duration, wherever it sits.
+    duration: int | None = None
+    unknown_duration = ""
+    for index, token in enumerate(remaining):
+        if not _is_unit_duration(token):
+            continue
+        parsed = parse_duration(token, default=None)
+        if parsed is None:
+            unknown_duration = token
+        else:
+            duration = parsed
+        remaining.pop(index)
+        break
 
     # With no @ present, the first QQ-like token is the target.
     if not targets:
@@ -70,18 +98,19 @@ def parse_target_args(
                 remaining.pop(index)
                 break
 
-    duration: int | None = None
-    unknown_duration = ""
-    for index, token in enumerate(remaining):
-        if not _is_duration_like(token):
-            continue
-        parsed = parse_duration(token, default=None)
-        if parsed is None:
-            unknown_duration = token
-        else:
-            duration = parsed
-        remaining.pop(index)
-        break
+    # A bare number is only a duration once a target is known; otherwise it was
+    # meant as the target itself (``禁言 123456`` mutes that member).
+    if duration is None and not unknown_duration:
+        for index, token in enumerate(remaining):
+            if not token.isdigit():
+                continue
+            parsed = parse_duration(token, default=None)
+            if parsed is None:
+                unknown_duration = token
+            else:
+                duration = parsed
+            remaining.pop(index)
+            break
 
     return TargetArgs(
         targets=targets,
@@ -122,6 +151,18 @@ def _is_duration_like(token: str) -> bool:
         return True
     # e.g. "10m", "10x", "2H" -- a number plus one trailing letter.
     return len(lowered) >= 2 and lowered[:-1].isdigit() and lowered[-1].isalpha()
+
+
+def _is_unit_duration(token: str) -> bool:
+    """Return whether a token carries an explicit duration unit.
+
+    Args:
+        token: Raw argument token.
+
+    Returns:
+        ``True`` for tokens such as ``10m``, ``2h`` or ``30s``.
+    """
+    return _is_duration_like(token) and not token.isdigit()
 
 
 def parse_duration_token(tokens: list[str]) -> int | None:

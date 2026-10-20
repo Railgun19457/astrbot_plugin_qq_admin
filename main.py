@@ -18,6 +18,7 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import AtAll
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
@@ -41,6 +42,7 @@ from .core.config import (
 )
 from .core.confirm import ConfirmManager, PendingAction
 from .core.export import Exporter, to_file_uri
+from .core.filters import mentioned_command
 from .core.messages import render_template
 from .core.notify import Notifier
 from .core.onebot import ActionResult, OneBotClient
@@ -270,6 +272,9 @@ class QQAdminPlugin(Star):
         self._audit_retention_days = int(audit_conf.get("retention_days", 30))
 
         self._blacklist_enabled = bool(blacklist_conf.get("enabled", True))
+        self._block_blacklisted_message = bool(
+            blacklist_conf.get("block_message", False),
+        )
         self.blacklist_default_reason = (
             str(blacklist_conf.get("default_reason") or "未填写原因").strip()
             or "未填写原因"
@@ -685,16 +690,18 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("禁言", alias={"ban"})
+    @filter.custom_filter(mentioned_command("禁言", "ban"))
     async def ban(
         self,
         event: AstrMessageEvent,
-        args: GreedyStr = "",
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
         """禁言群成员，或使用「禁言 全体」开启全群禁言。
 
         Args:
             event: 消息事件。
-            args: 后续参数，形如「@某人 10m 刷屏」或「全体 1h」。允许省略。
+            args: 后续参数，形如「@某人 10m 刷屏」或「全体 1h」，顺序任意。
+                允许省略。
         """
         if self._should_skip(event):
             return
@@ -703,8 +710,17 @@ class QQAdminPlugin(Star):
 
         operator = await self._permission_context(event)
 
-        if tokens and is_all_target(tokens[0]):
-            async for item in self._whole_ban(event, operator, group_id, tokens[1:]):
+        # 「全体」可以出现在任意位置（禁言 全体 10m / 禁言 10m 全体），@全体成员
+        # 在 message_str 中不会留下文本，所以单独检查消息链。
+        whole_index = next(
+            (index for index, token in enumerate(tokens) if is_all_target(token)),
+            None,
+        )
+        if whole_index is not None or any(
+            isinstance(component, AtAll) for component in event.get_messages()
+        ):
+            rest = [token for index, token in enumerate(tokens) if index != whole_index]
+            async for item in self._whole_ban(event, operator, group_id, rest):
                 yield item
             return
 
@@ -845,15 +861,13 @@ class QQAdminPlugin(Star):
                     result="failed",
                     error=outcome,
                 )
-                async for item in self._reply(
-                    event,
-                    self._text(
-                        "confirm_timeout"
-                        if outcome == "timeout"
-                        else "confirm_cancelled"
-                    ),
-                ):
-                    yield item
+                # 超时与异常提示由确认管理器直接发出，这里只补取消提示。
+                if outcome == "cancelled":
+                    async for item in self._reply(
+                        event,
+                        self._text("confirm_cancelled"),
+                    ):
+                        yield item
                 return
 
         result = await self.client.set_group_whole_ban(event, group_id, enabled=True)
@@ -900,10 +914,11 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("解禁", alias={"unban"})
+    @filter.custom_filter(mentioned_command("解禁", "unban"))
     async def unban(
         self,
         event: AstrMessageEvent,
-        args: GreedyStr = "",
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
         """解除禁言，或使用「解禁 全体」关闭全群禁言。
 
@@ -917,7 +932,9 @@ class QQAdminPlugin(Star):
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
 
-        if is_all_target(text):
+        if any(is_all_target(token) for token in text.split()) or any(
+            isinstance(component, AtAll) for component in event.get_messages()
+        ):
             allowed, deny_reason = check_capability(
                 operator,
                 self.permission_settings,
@@ -1023,10 +1040,11 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("踢", alias={"kick", "踢人"})
+    @filter.custom_filter(mentioned_command("踢", "kick", "踢人"))
     async def kick(
         self,
         event: AstrMessageEvent,
-        args: GreedyStr = "",
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
         """将成员移出本群，支持可选理由。
 
@@ -1088,15 +1106,13 @@ class QQAdminPlugin(Star):
                     result="failed",
                     error=outcome,
                 )
-                async for item in self._reply(
-                    event,
-                    self._text(
-                        "confirm_timeout"
-                        if outcome == "timeout"
-                        else "confirm_cancelled"
-                    ),
-                ):
-                    yield item
+                # 超时与异常提示由确认管理器直接发出，这里只补取消提示。
+                if outcome == "cancelled":
+                    async for item in self._reply(
+                        event,
+                        self._text("confirm_cancelled"),
+                    ):
+                        yield item
                 return
 
         lines: list[str] = []
@@ -1135,6 +1151,7 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("撤回", alias={"recall"})
+    @filter.custom_filter(mentioned_command("撤回", "recall"))
     async def recall(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         """撤回消息。回复目标消息后使用本指令。
 
@@ -1206,10 +1223,11 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群公告", alias={"notice"})
+    @filter.custom_filter(mentioned_command("群公告", "notice"))
     async def notice(
         self,
         event: AstrMessageEvent,
-        content: GreedyStr = "",
+        content: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
         """发送群公告；不带参数时查看当前公告。
 
@@ -1288,6 +1306,7 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群管", alias={"qqadmin"})
+    @filter.custom_filter(mentioned_command("群管", "qqadmin"))
     async def help_command(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         """查看 QQ群管插件的指令用法。
 
@@ -1309,11 +1328,11 @@ class QQAdminPlugin(Star):
             "  黑名单                     查看本群组黑名单",
             "  群成员 [页码]              群成员概览",
             "  群导出 成员 / 黑名单       导出 xlsx 并上传群文件",
-            "  审核 / 审核列表            查看待审核的进群申请",
-            "  审核同意 / 审核拒绝 <编号> 处理指定申请",
+            "  审核 [列表]                查看待审核的进群申请",
+            "  审核 同意 / 拒绝 <编号>    处理指定申请",
             "  群管状态                   查看运行状态与群组归属",
             "",
-            "提示：指令与 @ 之间需要空格；若与其他插件指令重名，",
+            "提示：指令与 @ 之间需要空格；时长与目标的位置可以互换；若与其他插件指令重名，",
             "可在 WebUI 的「插件 → 管理行为」中重命名。",
         ]
         async for item in self._reply(event, "\n".join(lines)):
@@ -1321,6 +1340,7 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群管状态", alias={"qqadminstatus"})
+    @filter.custom_filter(mentioned_command("群管状态", "qqadminstatus"))
     async def status(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         """查看插件运行状态与当前群的群组归属。
 
@@ -1360,6 +1380,10 @@ class QQAdminPlugin(Star):
             lines.append(f"  所属群组：无（{self._text('group_unconfigured')}）")
         lines.append(f"  已配置群组总数：{len(self.group_sets)}")
         lines.append(f"  黑名单条目：{self.blacklist.count(self._scope(group_id))}")
+        lines.append(
+            "  黑名单发言拦截："
+            f"{'已开启' if self._block_blacklisted_message else '已关闭'}",
+        )
 
         conflicted = self._conflicting_groups()
         if conflicted:
@@ -1379,10 +1403,11 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("拉黑", alias={"blacklist"})
+    @filter.custom_filter(mentioned_command("拉黑", "blacklist"))
     async def blacklist_add(
         self,
         event: AstrMessageEvent,
-        args: GreedyStr = "",
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
         """将成员加入本群组的黑名单，原因会记入导出表格。
 
@@ -1474,10 +1499,11 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("解除拉黑", alias={"unblack"})
+    @filter.custom_filter(mentioned_command("解除拉黑", "unblack"))
     async def blacklist_remove(
         self,
         event: AstrMessageEvent,
-        args: GreedyStr = "",
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
         """将成员移出本群组的黑名单。
 
@@ -1550,6 +1576,7 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("黑名单", alias={"blist"})
+    @filter.custom_filter(mentioned_command("黑名单", "blist"))
     async def blacklist_list(
         self,
         event: AstrMessageEvent,
@@ -1635,6 +1662,57 @@ class QQAdminPlugin(Star):
             for group_id in group_set["group_ids"]:
                 seen[group_id] = seen.get(group_id, 0) + 1
         return sorted(gid for gid, count in seen.items() if count > 1)
+
+    # ------------------------------------------------------------------ #
+    #  Blacklist message blocking
+    # ------------------------------------------------------------------ #
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def block_blacklisted_message(self, event: AstrMessageEvent) -> None:
+        """Recall messages sent by blacklisted members.
+
+        The platform has already accepted the message by the time AstrBot sees
+        it, so the only achievable interception is a recall. Events are not
+        stopped, keeping other plugins unaffected.
+
+        Args:
+            event: The incoming group message event.
+        """
+        if not self.enabled or not self._block_blacklisted_message:
+            return
+        if event.get_platform_name() != SUPPORTED_PLATFORM:
+            return
+
+        group_id = str(event.get_group_id() or "")
+        user_id = str(event.get_sender_id() or "")
+        if not group_id or not user_id or user_id == str(event.get_self_id() or ""):
+            return
+
+        scope = self._scope(group_id)
+        if not self.blacklist.is_blacklisted(scope, user_id):
+            return
+
+        message_id = str(getattr(event.message_obj, "message_id", "") or "")
+        if not message_id:
+            return
+
+        result = await self.client.delete_msg(event, message_id)
+        self.audit.log(
+            "blacklist_block",
+            "system",
+            target=user_id,
+            group_id=group_id,
+            scope=scope,
+            result="ok" if result.ok else "failed",
+            error=result.error,
+            message_id=message_id,
+        )
+        if not result.ok:
+            logger.warning(
+                f"[QQAdmin] 撤回黑名单成员 {user_id} 在群 {group_id} 的消息失败："
+                f"{result.error}",
+            )
 
     # ------------------------------------------------------------------ #
     #  Join request review
@@ -1855,12 +1933,13 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("审核", alias={"review"})
+    @filter.custom_filter(mentioned_command("审核", "review"))
     async def review_command(
         self,
         event: AstrMessageEvent,
-        args: GreedyStr = "",
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
-        """处理待审核的进群申请：审核 / 审核同意 <编号> / 审核拒绝 <编号>。
+        """处理待审核的进群申请：审核 / 审核 同意 <编号> / 审核 拒绝 <编号>。
 
         Args:
             event: 消息事件。
@@ -1873,7 +1952,7 @@ class QQAdminPlugin(Star):
         allowed, deny_reason = check_capability(
             operator,
             self.permission_settings,
-            "export",
+            "review",
         )
         if not allowed:
             async for item in self._reply(
@@ -1897,7 +1976,7 @@ class QQAdminPlugin(Star):
                     f"{index}. 群{request.group_id} "
                     f"{request.user_id} | {request.comment or '（无）'}",
                 )
-            lines.append("回复「审核同意 <编号>」或「审核拒绝 <编号>」处理")
+            lines.append("回复「审核 同意 <编号>」或「审核 拒绝 <编号>」处理")
             async for item in self._reply(event, "\n".join(lines)):
                 yield item
             return
@@ -1906,7 +1985,7 @@ class QQAdminPlugin(Star):
         if verb not in ("同意", "拒绝") or len(tokens) < 2:
             async for item in self._reply(
                 event,
-                "用法：审核 / 审核列表 / 审核同意 <编号> / 审核拒绝 <编号>",
+                "用法：审核 / 审核 列表 / 审核 同意 <编号> / 审核 拒绝 <编号>",
             ):
                 yield item
             return
@@ -2073,6 +2152,7 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群成员", alias={"gmembers"})
+    @filter.custom_filter(mentioned_command("群成员", "gmembers"))
     async def member_list(
         self,
         event: AstrMessageEvent,
@@ -2132,10 +2212,11 @@ class QQAdminPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群导出", alias={"gexport"})
+    @filter.custom_filter(mentioned_command("群导出", "gexport"))
     async def export_command(
         self,
         event: AstrMessageEvent,
-        args: GreedyStr = "",
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
         """导出群成员名单或黑名单表格并上传到群文件。
 

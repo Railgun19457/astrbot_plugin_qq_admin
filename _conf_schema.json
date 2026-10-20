@@ -56,7 +56,7 @@
           "manage_session": {
             "type": "string",
             "description": "管理会话",
-            "hint": "接收进群审核通知的会话。格式 group:123456（群聊）或 private:10001（私聊）。留空则回退到申请所在的群",
+            "hint": "接收进群审核通知的会话 UMO，可在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456（群聊）或 aiocqhttp:FriendMessage:10001（私聊）。无需区分群聊与私聊，留空则回退到申请所在的群",
             "default": ""
           },
           "notice_enabled": {
@@ -153,6 +153,13 @@
             "default": "any",
             "options": ["any", "group_admin", "astrbot_admin"]
           },
+          "review": {
+            "name": "进群审核",
+            "description": "查看与处理待审核的进群申请",
+            "type": "string",
+            "default": "group_admin",
+            "options": ["any", "group_admin", "astrbot_admin"]
+          },
           "export": {
             "name": "导出表格",
             "description": "导出成员名单与黑名单表格",
@@ -178,6 +185,12 @@
         "description": "默认拉黑原因",
         "hint": "指令或 LLM 未提供原因时使用的占位文案。拉黑原因会写入黑名单数据并出现在导出的表格中",
         "default": "未填写原因"
+      },
+      "block_message": {
+        "type": "bool",
+        "description": "撤回黑名单成员的群消息",
+        "hint": "开启后，黑名单成员在群内发言时插件会立即撤回该消息（需机器人有撤回权限）；不会阻止其他插件或模型继续处理该消息。默认关闭，仅作记录与进群审核拦截",
+        "default": false
       }
     }
   },

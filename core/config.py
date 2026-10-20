@@ -34,6 +34,7 @@ CAPABILITY_KEYS: tuple[str, ...] = (
     "notice",
     "blacklist",
     "query",
+    "review",
     "export",
 )
 
