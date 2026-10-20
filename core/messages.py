@@ -38,7 +38,6 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "confirm_timeout": "操作已取消（等待确认超时）",
     "confirm_cancelled": "操作已取消",
     "confirm_not_operator": "只有发起该操作的人可以确认",
-    "group_unconfigured": "本群未加入任何群组，部分功能（共享黑名单、进群审核）不可用",
     "review_new_request": (
         "【进群申请】群 {group_id}\n"
         "申请人：{user_id}\n"

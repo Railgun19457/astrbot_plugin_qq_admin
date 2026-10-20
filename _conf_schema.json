@@ -8,7 +8,7 @@
   "llm_tool_options": {
     "type": "list",
     "description": "函数工具选项",
-    "hint": "选择向 LLM 暴露的函数工具，未勾选的不会暴露。默认为空：AstrBot 对非内置工具的权限门控默认不拦截，开启前请确认你信任能触发模型的人，并建议在 WebUI 的「扩展 → 组件」里把这些工具设为 admin",
+    "hint": "选择暴露给 LLM 的工具。默认全部关闭：非内置工具默认不受权限门控，开启前请确认使用者可信，并建议在「扩展 → 组件」中设为 admin",
     "options": [
       "qq_ban_member",
       "qq_whole_ban",
@@ -26,7 +26,7 @@
   "group_sets": {
     "type": "template_list",
     "description": "群组定义",
-    "hint": "每个群组包含若干 QQ 群，组内共享黑名单、进群审核策略与默认禁言时长。管理会话用于接收进群审核通知。未加入任何群组的群会退化为单群模式并使用内置默认设置",
+    "hint": "插件只对这里配置的群生效",
     "templates": {
       "group_set": {
         "name": "群组",
@@ -35,7 +35,7 @@
           "name": {
             "type": "string",
             "description": "群组名称",
-            "hint": "仅用于显示，例如「主群组」",
+            "hint": "仅用于显示",
             "default": ""
           },
           "group_ids": {
@@ -44,13 +44,13 @@
               "type": "string"
             },
             "description": "群号列表",
-            "hint": "属于该群组的 QQ 群号，字符串形式。同一个群号不要重复出现在多个群组里",
+            "hint": "同一群号不要重复出现在多个群组里",
             "default": []
           },
           "manage_session": {
             "type": "string",
             "description": "管理会话",
-            "hint": "接收进群审核通知的会话 UMO，可在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456（群聊）或 aiocqhttp:FriendMessage:10001（私聊）。无需区分群聊与私聊，留空则回退到申请所在的群",
+            "hint": "接收审核通知的会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456；留空则发到申请所在群",
             "default": ""
           },
           "notice_enabled": {
@@ -61,7 +61,7 @@
           "default_ban_duration": {
             "type": "string",
             "description": "默认禁言时长",
-            "hint": "本群组未指定时长时使用。支持 600（秒）、10m、2h、1d 等写法",
+            "hint": "支持 600（秒）、10m、2h、1d 等写法",
             "default": "10m"
           },
           "blacklist": {
@@ -71,25 +71,25 @@
               "enabled": {
                 "type": "bool",
                 "description": "启用黑名单",
-                "hint": "关闭后本群组的拉黑指令与黑名单查询会直接拒绝，已有条目保留；黑名单发言撤回与审核拒绝同时失效",
+                "hint": "关闭后拉黑与查询会直接拒绝，撤回和审核拒绝同时失效；已有条目保留",
                 "default": true
               },
               "default_reason": {
                 "type": "string",
                 "description": "默认拉黑原因",
-                "hint": "指令或 LLM 未提供原因时使用的占位文案。拉黑原因会写入黑名单数据并出现在导出的表格中",
+                "hint": "指令或工具未提供原因时使用的文案",
                 "default": "未填写原因"
               },
               "block_message": {
                 "type": "bool",
                 "description": "撤回黑名单成员的群消息",
-                "hint": "开启后，黑名单成员在本群组发言时插件会立即撤回该消息（需机器人有撤回权限）；不会阻止其他插件或模型继续处理该消息。默认关闭，仅作记录与进群审核拦截",
+                "hint": "黑名单成员发言后立即撤回（需撤回权限）；不会阻止其他插件或模型处理该消息",
                 "default": false
               },
               "kick_on_add": {
                 "type": "bool",
                 "description": "拉黑后自动踢出群聊",
-                "hint": "开启后，在本群组拉黑成功时会立即把目标移出当前群（需机器人有踢人权限）。只影响执行拉黑的那个群，不会清理群组内其他群",
+                "hint": "拉黑成功后把目标移出当前群（需踢人权限）；只作用于执行拉黑的群",
                 "default": false
               }
             }
@@ -97,27 +97,18 @@
           "join_review": {
             "type": "object",
             "description": "自动进群审核",
-            "hint": "仅对本群组内的群生效；未加入任何群组的群会跳过自动审核并在日志中记录。可用「按群审核设置」为单个群单独覆盖",
+            "hint": "本群组的通用规则，对组内所有群生效；未加入群组的群不会自动审核",
             "items": {
               "enabled": {
                 "type": "bool",
-                "description": "启用自动审核",
+                "description": "启用进群审核",
                 "default": false
               },
               "blacklist_reject": {
                 "type": "bool",
                 "description": "黑名单成员自动拒绝",
-                "hint": "申请人处于该群组的黑名单中时直接拒绝（需本群组启用黑名单）",
+                "hint": "申请人处于本群组黑名单中时直接拒绝（需启用黑名单）",
                 "default": true
-              },
-              "sibling_group_ids": {
-                "type": "list",
-                "items": {
-                  "type": "string"
-                },
-                "description": "同组放行的来源群",
-                "hint": "申请人是这些群中任意一个的成员时直接通过，不再检查等级与关键词。留空表示关闭；目标群本身会被忽略",
-                "default": []
               },
               "keyword_allow": {
                 "type": "bool",
@@ -130,7 +121,7 @@
                   "type": "string"
                 },
                 "description": "放行关键词",
-                "hint": "申请答案中命中任意一个即视为匹配，不区分大小写；需开启上方的关键词放行开关",
+                "hint": "直接填写对所有群生效；写成「群号:关键词」只对该群生效，例如 123456:答案",
                 "default": []
               },
               "question_type": {
@@ -147,19 +138,19 @@
               "min_account_level": {
                 "type": "int",
                 "description": "最低 QQ 等级",
-                "hint": "0 表示不检查。需要协议端支持 _get_group_member_info 的 level 字段，不支持时会跳过校验并记录一次警告",
+                "hint": "0 表示不检查；需协议端支持 level 字段，不支持时跳过并警告",
                 "default": 0
               },
               "manual_confirm": {
                 "type": "bool",
-                "description": "白名单外转人工确认",
-                "hint": "未命中任何规则时，把申请转发到管理会话等待人工同意/拒绝",
+                "description": "转人工确认",
+                "hint": "未命中黑名单、免审核或关键词时，转发到管理会话等待人工处理",
                 "default": true
               },
               "unattended_action": {
                 "type": "string",
                 "description": "无人值守时的默认行为",
-                "hint": "仅在关闭「转人工确认」时生效。hold=保持待审（推荐），reject=直接拒绝，approve=直接放行",
+                "hint": "仅在关闭「转人工确认」时生效：hold=保持待审，reject=直接拒绝，approve=直接放行",
                 "options": [
                   "hold",
                   "reject",
@@ -171,105 +162,18 @@
               "reject_reason": {
                 "type": "string",
                 "description": "拒绝理由",
-                "hint": "展示给申请人的拒绝原因",
                 "default": "未通过进群审核"
+              },
+              "exemptions": {
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "description": "跨群免审核",
+                "hint": "直接填来源群号（逗号分隔）对所有群生效；写成「目标群:来源群1,来源群2」只对该目标群生效。命中后直接通过，黑名单优先",
+                "default": []
               }
             }
-          }
-        }
-      }
-    }
-  },
-  "review_overrides": {
-    "type": "template_list",
-    "description": "按群审核设置",
-    "hint": "为单个群覆盖所属群组的进群审核配置，未列出的群沿用群组设置。按群设置优先于群组设置",
-    "templates": {
-      "review_override": {
-        "name": "按群审核",
-        "display_item": "group_id",
-        "items": {
-          "group_id": {
-            "type": "string",
-            "description": "群号",
-            "hint": "需要属于某个群组，否则不会生效",
-            "default": ""
-          },
-          "enabled": {
-            "type": "bool",
-            "description": "启用自动审核",
-            "default": false,
-            "hint": "单独控制这个群是否启用自动审核"
-          },
-          "blacklist_reject": {
-            "type": "bool",
-            "description": "黑名单成员自动拒绝",
-            "hint": "申请人处于该群组的黑名单中时直接拒绝（需本群组启用黑名单）",
-            "default": true
-          },
-          "sibling_group_ids": {
-            "type": "list",
-            "items": {
-              "type": "string"
-            },
-            "description": "同组放行的来源群",
-            "hint": "申请人是这些群中任意一个的成员时直接通过。留空表示关闭；目标群本身会被忽略",
-            "default": []
-          },
-          "keyword_allow": {
-            "type": "bool",
-            "description": "答案匹配关键词时自动放行",
-            "default": true
-          },
-          "keywords": {
-            "type": "list",
-            "items": {
-              "type": "string"
-            },
-            "description": "放行关键词",
-            "hint": "申请答案中命中任意一个即视为匹配，不区分大小写；需开启上方的关键词放行开关",
-            "default": []
-          },
-          "question_type": {
-            "type": "string",
-            "description": "关键词适用的申请类型",
-            "hint": "any=全部，add=主动申请，invite=被邀请",
-            "options": [
-              "any",
-              "add",
-              "invite"
-            ],
-            "default": "any"
-          },
-          "min_account_level": {
-            "type": "int",
-            "description": "最低 QQ 等级",
-            "hint": "0 表示不检查。需要协议端支持 _get_group_member_info 的 level 字段，不支持时会跳过校验并记录一次警告",
-            "default": 0
-          },
-          "manual_confirm": {
-            "type": "bool",
-            "description": "白名单外转人工确认",
-            "hint": "未命中任何规则时，把申请转发到管理会话等待人工同意/拒绝",
-            "default": true
-          },
-          "unattended_action": {
-            "type": "string",
-            "description": "无人值守时的默认行为",
-            "hint": "仅在关闭「转人工确认」时生效。hold=保持待审（推荐），reject=直接拒绝，approve=直接放行",
-            "options": [
-              "hold",
-              "reject",
-              "approve"
-            ],
-            "default": "hold",
-            "obvious_hint": true
-          },
-          "reject_reason": {
-            "type": "string",
-            "description": "拒绝理由",
-            "hint": "展示给申请人的拒绝原因",
-            "default": "未通过进群审核"
           }
         }
       }
@@ -297,13 +201,13 @@
       "allow_group_admin": {
         "type": "bool",
         "description": "允许群主与群管理员",
-        "hint": "按 OneBot 返回的 role 字段判定（owner / admin）",
+        "hint": "按 OneBot 返回的 owner / admin 角色判定",
         "default": true
       },
       "allow_member_command": {
         "type": "bool",
         "description": "允许普通成员使用查询类指令",
-        "hint": "仅影响所需等级为「任何人」的指令，例如查看黑名单、查看群组状态",
+        "hint": "仅影响「任何人」级别的查询指令",
         "default": true
       },
       "capability_level": {
@@ -487,7 +391,7 @@
       "cleanup_hours": {
         "type": "int",
         "description": "导出文件保留时长（小时）",
-        "hint": "插件启动时清理超期文件，填 0 表示不清理",
+        "hint": "启动时清理，0 表示不清理",
         "default": 24
       }
     }
@@ -499,13 +403,12 @@
       "operation_receipt": {
         "type": "bool",
         "description": "操作回执发到触发群",
-        "hint": "执行禁言、踢人等操作后在群里回复结果",
         "default": true
       },
       "receipt_to_manage_session": {
         "type": "bool",
         "description": "操作回执同时发到管理会话",
-        "hint": "开启后，操作回执会额外发送到该群所属群组的管理会话；需先在群组里配置「管理会话」且与当前会话不同，否则不会重复发送",
+        "hint": "需在群组里配置管理会话；与当前会话相同时不会重复发送",
         "default": false
       }
     }
@@ -523,7 +426,7 @@
       "retention_days": {
         "type": "int",
         "description": "保留天数",
-        "hint": "插件启动时清理超过该天数的记录，填 0 表示不清理",
+        "hint": "启动时清理，0 表示不清理",
         "default": 30
       }
     }
@@ -625,7 +528,7 @@
       "blacklist_disabled": {
         "type": "text",
         "description": "黑名单功能已关闭",
-        "hint": "群组里关闭「黑名单」后，拉黑指令与工具返回的提示",
+        "hint": "群组关闭黑名单后，拉黑指令与工具返回的提示",
         "default": "黑名单功能已在插件配置中关闭"
       },
       "blacklist_header": {
@@ -670,11 +573,6 @@
         "type": "text",
         "description": "非操作者尝试确认",
         "default": "只有发起该操作的人可以确认"
-      },
-      "group_unconfigured": {
-        "type": "text",
-        "description": "群未加入任何群组时的提示",
-        "default": "本群未加入任何群组，部分功能（共享黑名单、进群审核）不可用"
       },
       "review_new_request": {
         "type": "text",

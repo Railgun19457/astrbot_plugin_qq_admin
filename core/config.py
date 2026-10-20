@@ -34,12 +34,10 @@ REVIEW_QUESTION_TYPES: tuple[str, ...] = ("any", "add", "invite")
 #: Actions an unattended join request may fall back to.
 UNATTENDED_ACTIONS: tuple[str, ...] = ("hold", "reject", "approve")
 
-#: Built-in join review policy, used when neither a per-group override nor a
-#: group set provides one.
+#: Built-in join review policy of a group set.
 DEFAULT_REVIEW_POLICY: dict[str, Any] = {
     "enabled": False,
     "blacklist_reject": True,
-    "sibling_group_ids": [],
     "keyword_allow": True,
     "keywords": [],
     "question_type": "any",
@@ -58,7 +56,6 @@ DEFAULT_GROUP_SETTINGS: dict[str, Any] = {
         "block_message": False,
         "kick_on_add": False,
     },
-    "join_review": dict(DEFAULT_REVIEW_POLICY),
 }
 
 #: Multipliers for the ``10s`` / ``10m`` / ``2h`` / ``1d`` duration syntax.
@@ -199,11 +196,10 @@ def normalize_id_list(raw: Any) -> list[str]:
 
 
 def normalize_review_policy(raw: Any) -> dict[str, Any]:
-    """Normalize one join review policy block.
+    """Normalize the conditions and actions of one join review policy.
 
     Args:
-        raw: Raw ``join_review`` object of a group set, or a per-group override
-            entry (its ``group_id`` is ignored here).
+        raw: Raw ``join_review`` object of a group set, or a merged override.
 
     Returns:
         A policy dict with every key filled from the built-in defaults.
@@ -224,14 +220,19 @@ def normalize_review_policy(raw: Any) -> dict[str, Any]:
         unattended = "hold"
 
     keyword_allow = bool(source.get("keyword_allow", True))
-    keywords = normalize_id_list(source.get("keywords")) if keyword_allow else []
+    keywords, keywords_by_group = _split_scoped_entries(
+        source.get("keywords"),
+        split_values=False,
+    )
+    if not keyword_allow:
+        keywords, keywords_by_group = [], {}
 
     return {
         "enabled": bool(source.get("enabled", False)),
         "blacklist_reject": bool(source.get("blacklist_reject", True)),
-        "sibling_group_ids": normalize_id_list(source.get("sibling_group_ids")),
         "keyword_allow": keyword_allow,
         "keywords": keywords,
+        "keywords_by_group": keywords_by_group,
         "question_type": question_type,
         "min_account_level": min_level,
         "manual_confirm": bool(source.get("manual_confirm", True)),
@@ -243,44 +244,205 @@ def normalize_review_policy(raw: Any) -> dict[str, Any]:
     }
 
 
-def normalize_review_overrides(raw: Any) -> dict[str, dict[str, Any]]:
-    """Normalize the per-group join review overrides.
+def _split_scope(text: str) -> tuple[str, str]:
+    """Split a ``group:value`` entry into its scope and payload.
+
+    A leading number followed by a colon is treated as a QQ group id; anything
+    else is an unscoped entry. Both ASCII and full-width colons are accepted.
 
     Args:
-        raw: Raw ``review_overrides`` template list.
+        text: Raw list item.
 
     Returns:
-        Mapping from QQ group id to a fully normalized review policy. Entries
-        without a group id are skipped; when a group id repeats, the first entry
-        wins and a warning is logged.
+        ``(group_id, value)``; ``group_id`` is empty for unscoped entries.
+    """
+    raw = str(text or "").strip()
+    for separator in (":", "："):
+        if separator in raw:
+            head, _, tail = raw.partition(separator)
+            if head.strip().isdigit():
+                return head.strip(), tail.strip()
+    return "", raw
+
+
+def _split_id_values(raw: Any) -> list[str]:
+    """Normalize an identifier list that may be a string or a sequence.
+
+    Args:
+        raw: JSON value from the configuration; strings are split on commas,
+            Chinese commas, enumeration commas and whitespace.
+
+    Returns:
+        A de-duplicated list of non-empty strings.
+    """
+    if isinstance(raw, str):
+        return normalize_id_list(re.split(r"[,，、\s]+", raw))
+    return normalize_id_list(raw)
+
+
+def _split_scoped_entries(
+    raw: Any,
+    *,
+    split_values: bool,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Split a list of plain and ``group:value`` entries.
+
+    Args:
+        raw: Raw list from the configuration.
+        split_values: When ``True`` the payload is split on commas, Chinese
+            commas and whitespace (used for group id lists). Otherwise the
+            payload is kept verbatim (used for keywords, which may contain
+            spaces).
+
+    Returns:
+        ``(general, per_group)``: unscoped values in order, and scoped values
+        grouped by group id.
+    """
+    general: list[str] = []
+    per_group: dict[str, list[str]] = {}
+    if not isinstance(raw, (list, tuple)):
+        return general, per_group
+
+    for item in raw:
+        group_id, value = _split_scope(str(item or ""))
+        if not value:
+            continue
+        values = _split_id_values(value) if split_values else [value]
+        if not group_id:
+            general.extend(values)
+            continue
+        bucket = per_group.setdefault(group_id, [])
+        for entry in values:
+            if entry not in bucket:
+                bucket.append(entry)
+    return general, per_group
+
+
+def normalize_review_settings(raw: Any) -> dict[str, Any]:
+    """Normalize a group set's ``join_review`` block.
+
+    Args:
+        raw: Raw ``join_review`` object of a group set.
+
+    Returns:
+        A dict with ``policy`` (the general rule) and ``exemptions`` (normalized
+        cross-group exemption entries).
+    """
+    source = raw if isinstance(raw, dict) else {}
+    return {
+        "policy": normalize_review_policy(source),
+        "exemptions": normalize_review_exemptions(source.get("exemptions")),
+    }
+
+
+def normalize_review_exemptions(raw: Any) -> list[dict[str, Any]]:
+    """Normalize the cross-group review exemptions.
+
+    Entries are plain strings: ``"来源群1,来源群2"`` applies to every group of
+    the set, while ``"目标群:来源群1,来源群2"`` applies only to that target. A
+    template-style list of objects is accepted too.
+
+    Args:
+        raw: Raw ``join_review.exemptions`` value.
+
+    Returns:
+        Entries with ``target_group_ids`` (empty means every group) and
+        ``source_group_ids``. Entries without sources are skipped.
     """
     if not isinstance(raw, (list, tuple)):
-        return {}
+        return []
 
-    result: dict[str, dict[str, Any]] = {}
+    result: list[dict[str, Any]] = []
     for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            logger.warning(f"[QQAdmin] 按群审核设置第 {index + 1} 项不是对象，已忽略")
+        if isinstance(item, dict):
+            sources = _split_id_values(item.get("source_group_ids"))
+            targets = _split_id_values(item.get("target_group_ids"))
+        else:
+            target, value = _split_scope(str(item or ""))
+            sources = _split_id_values(value)
+            targets = [target] if target else []
+        if not sources:
+            logger.warning(f"[QQAdmin] 跨群免审核第 {index + 1} 项未填写来源群，已忽略")
             continue
-        group_id = str(item.get("group_id") or "").strip()
-        if not group_id:
-            logger.warning(f"[QQAdmin] 按群审核设置第 {index + 1} 项未填写群号，已忽略")
-            continue
-        if group_id in result:
-            logger.warning(
-                f"[QQAdmin] 群 {group_id} 的按群审核设置重复，以先出现的为准"
-            )
-            continue
-        result[group_id] = normalize_review_policy(item)
+        result.append(
+            {
+                "target_group_ids": targets,
+                "source_group_ids": sources,
+            }
+        )
     return result
+
+
+def review_keywords(policy: dict[str, Any], group_id: str) -> list[str]:
+    """Return the keywords that apply to a group.
+
+    Args:
+        policy: Output of :func:`normalize_review_policy`.
+        group_id: QQ group being joined.
+
+    Returns:
+        General keywords followed by the ones scoped to the group.
+    """
+    return list(policy["keywords"]) + list(
+        policy["keywords_by_group"].get(group_id, [])
+    )
+
+
+def group_review_policy(
+    group_sets: list[dict[str, Any]],
+    target_group_id: str,
+) -> dict[str, Any] | None:
+    """Resolve the join review policy of a group.
+
+    Args:
+        group_sets: Output of :func:`normalize_group_sets`.
+        target_group_id: Group being joined; chooses the owning group set.
+
+    Returns:
+        The owning group set's policy, or ``None`` when the group belongs to no
+        set (automatic review only runs for configured groups).
+    """
+    group_set = find_group_set(group_sets, target_group_id)
+    return group_set["join_review"]["policy"] if group_set else None
+
+
+def review_exempt_sources(
+    group_sets: list[dict[str, Any]],
+    target_group_id: str,
+) -> list[str]:
+    """Collect the source groups that exempt a target group from review.
+
+    Exemptions are defined on the group set owning the target group; multiple
+    matching entries are merged.
+
+    Args:
+        group_sets: Output of :func:`normalize_group_sets`.
+        target_group_id: QQ group being joined.
+
+    Returns:
+        De-duplicated source group ids; empty when no exemption applies.
+    """
+    group_set = find_group_set(group_sets, target_group_id)
+    if group_set is None:
+        return []
+    sources: list[str] = []
+    for entry in group_set["join_review"]["exemptions"]:
+        if (
+            entry["target_group_ids"]
+            and target_group_id not in entry["target_group_ids"]
+        ):
+            continue
+        for group_id in entry["source_group_ids"]:
+            if group_id not in sources:
+                sources.append(group_id)
+    return sources
 
 
 def normalize_group_settings(raw: Any) -> dict[str, Any]:
     """Normalize the per-group behaviour settings of a group set.
 
-    Every group set carries its own ban duration, blacklist policy and join
-    review policy, so features can differ between groups that are managed by
-    the same plugin instance.
+    Every group set carries its own ban duration, blacklist policy and general
+    join review policy, so features can differ between group sets.
 
     Args:
         raw: Raw ``group_set`` entry from the plugin configuration.
@@ -312,7 +474,7 @@ def normalize_group_settings(raw: Any) -> dict[str, Any]:
             "block_message": bool(raw_blacklist.get("block_message", False)),
             "kick_on_add": bool(raw_blacklist.get("kick_on_add", False)),
         },
-        "join_review": normalize_review_policy(source.get("join_review")),
+        "join_review": normalize_review_settings(source.get("join_review")),
     }
 
 
@@ -425,36 +587,12 @@ def group_settings(
         group_id: QQ group id.
 
     Returns:
-        The owning group set (which carries ``default_ban_duration``,
-        ``blacklist`` and ``join_review``), or :data:`DEFAULT_GROUP_SETTINGS`
-        for groups outside every set. The mapping is read-only for callers.
+        The owning group set (which carries ``default_ban_duration`` and
+        ``blacklist``), or :data:`DEFAULT_GROUP_SETTINGS` for groups outside
+        every set. The mapping is read-only for callers.
     """
     group_set = find_group_set(group_sets, group_id)
     return group_set if group_set else DEFAULT_GROUP_SETTINGS
-
-
-def review_settings(
-    group_sets: list[dict[str, Any]],
-    overrides: dict[str, dict[str, Any]],
-    group_id: str,
-) -> dict[str, Any]:
-    """Resolve the join review policy that applies to a group.
-
-    The precedence is: per-group override, then the owning group set's policy,
-    then the built-in defaults.
-
-    Args:
-        group_sets: Output of :func:`normalize_group_sets`.
-        overrides: Output of :func:`normalize_review_overrides`.
-        group_id: QQ group id.
-
-    Returns:
-        The review policy for the group. Read-only for callers.
-    """
-    override = overrides.get(group_id)
-    if override is not None:
-        return override
-    return group_settings(group_sets, group_id)["join_review"]
 
 
 def blacklist_scope(group_id: str) -> str:

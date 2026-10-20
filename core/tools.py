@@ -78,12 +78,12 @@ def _failed(plugin: QQAdminPlugin, error: str, *, unsupported: bool = False) -> 
 
 
 def _no_group() -> str:
-    """Message returned when a tool is called outside a group chat.
+    """Message returned when a tool is called outside a configured group.
 
     Returns:
         The refusal text.
     """
-    return "error: 此工具只能在群聊中使用"
+    return "error: 当前会话不在已配置的群组中"
 
 
 def _safe_int(value: Any) -> int | None:

@@ -8,7 +8,7 @@ plugin listens for every message event and inspects
 Decision order for a group join request:
 
 1. blacklist hit -> reject
-2. already a member of a sibling group -> approve
+2. cross-group exemption match -> approve
 3. account level below the configured minimum -> reject
 4. keyword match -> approve
 5. ``manual_confirm`` on -> notify the manage session and wait for an operator
@@ -150,7 +150,7 @@ def evaluate(
     request: JoinRequest,
     *,
     is_blacklisted: bool,
-    is_sibling_member: bool,
+    is_exempt_member: bool,
     account_level: int | None,
     min_account_level: int,
     keywords: list[str],
@@ -163,8 +163,8 @@ def evaluate(
     Args:
         request: The request under evaluation.
         is_blacklisted: Whether the applicant is on the group's blacklist.
-        is_sibling_member: Whether the applicant already belongs to another
-            group of the same group set.
+        is_exempt_member: Whether the applicant already belongs to a source
+            group of a cross-group exemption.
         account_level: Applicant's QQ level, or ``None`` when the protocol
             implementation does not expose it.
         min_account_level: Lowest acceptable level; ``0`` disables the check.
@@ -180,8 +180,8 @@ def evaluate(
     if is_blacklisted:
         return ReviewDecision("reject", "blacklist", "申请人在黑名单中")
 
-    if is_sibling_member:
-        return ReviewDecision("approve", "sibling", "申请人已是同组其他群的成员")
+    if is_exempt_member:
+        return ReviewDecision("approve", "exempt", "申请人已在跨群免审核的来源群中")
 
     if (
         min_account_level > 0
