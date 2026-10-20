@@ -10,6 +10,10 @@ unconfigured groups instead of erroring out.
 
 The ``reason`` field is a first-class citizen: it is filled in by the command
 and the LLM tool, shown in receipts, and included in the exported table.
+
+Whether the blacklist is enabled, and whether blacklisted messages are
+recalled, is decided per group by the caller (see ``core.config``); the store
+itself always answers and persists.
 """
 
 from __future__ import annotations
@@ -96,15 +100,12 @@ class BlacklistStore:
         _store: Backing JSON store; shape is ``{scope: {user_id: entry}}``.
     """
 
-    def __init__(self, data_dir: Path, *, enabled: bool = True) -> None:
+    def __init__(self, data_dir: Path) -> None:
         """Prepare the store.
 
         Args:
             data_dir: Plugin data directory.
-            enabled: When ``False`` every lookup reports "not blacklisted" and
-                no data is written.
         """
-        self._enabled = bool(enabled)
         self._store = JsonStore(data_dir / "blacklist.json")
 
     # ------------------------------------------------------------------ #
@@ -135,9 +136,6 @@ class BlacklistStore:
         Returns:
             The active entry, or ``None``.
         """
-        if not self._enabled:
-            return None
-
         bucket = self._bucket(scope)
         raw = bucket.get(str(user_id))
         if raw is None:
@@ -166,9 +164,6 @@ class BlacklistStore:
         Returns:
             Entries sorted by creation time, oldest first.
         """
-        if not self._enabled:
-            return []
-
         bucket = self._bucket(scope, create=False)
         entries: list[BlacklistEntry] = []
         expired: list[str] = []
@@ -234,9 +229,8 @@ class BlacklistStore:
             expires_at=now + duration if duration > 0 else 0.0,
             nickname=str(nickname or ""),
         )
-        if self._enabled:
-            self._bucket(scope)[str(user_id)] = entry.to_dict()
-            self._store.save()
+        self._bucket(scope)[str(user_id)] = entry.to_dict()
+        self._store.save()
         return entry
 
     def remove(self, scope: str, user_id: str) -> bool:

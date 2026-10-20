@@ -22,6 +22,45 @@ MAX_BAN_DURATION: int = 30 * 24 * 3600
 #: Fallback duration when the user omits it entirely (10 minutes).
 DEFAULT_BAN_DURATION: int = 10 * 60
 
+#: Fallback blacklist reason when neither the command nor the config sets one.
+DEFAULT_BLACKLIST_REASON: str = "未填写原因"
+
+#: Fallback rejection reason shown to the applicant.
+DEFAULT_REVIEW_REJECT_REASON: str = "未通过进群审核"
+
+#: Request types a keyword answer may be limited to.
+REVIEW_QUESTION_TYPES: tuple[str, ...] = ("any", "add", "invite")
+
+#: Actions an unattended join request may fall back to.
+UNATTENDED_ACTIONS: tuple[str, ...] = ("hold", "reject", "approve")
+
+#: Built-in join review policy, used when neither a per-group override nor a
+#: group set provides one.
+DEFAULT_REVIEW_POLICY: dict[str, Any] = {
+    "enabled": False,
+    "blacklist_reject": True,
+    "sibling_group_ids": [],
+    "keyword_allow": True,
+    "keywords": [],
+    "question_type": "any",
+    "min_account_level": 0,
+    "manual_confirm": True,
+    "unattended_action": "hold",
+    "reject_reason": DEFAULT_REVIEW_REJECT_REASON,
+}
+
+#: Built-in behaviour settings used by groups that belong to no group set.
+DEFAULT_GROUP_SETTINGS: dict[str, Any] = {
+    "default_ban_duration": DEFAULT_BAN_DURATION,
+    "blacklist": {
+        "enabled": True,
+        "default_reason": DEFAULT_BLACKLIST_REASON,
+        "block_message": False,
+        "kick_on_add": False,
+    },
+    "join_review": dict(DEFAULT_REVIEW_POLICY),
+}
+
 #: Multipliers for the ``10s`` / ``10m`` / ``2h`` / ``1d`` duration syntax.
 _TIME_UNITS: dict[str, int] = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -159,6 +198,124 @@ def normalize_id_list(raw: Any) -> list[str]:
     return result
 
 
+def normalize_review_policy(raw: Any) -> dict[str, Any]:
+    """Normalize one join review policy block.
+
+    Args:
+        raw: Raw ``join_review`` object of a group set, or a per-group override
+            entry (its ``group_id`` is ignored here).
+
+    Returns:
+        A policy dict with every key filled from the built-in defaults.
+    """
+    source = raw if isinstance(raw, dict) else {}
+
+    try:
+        min_level = max(0, int(source.get("min_account_level", 0) or 0))
+    except (TypeError, ValueError):
+        min_level = 0
+
+    question_type = str(source.get("question_type") or "any").strip().lower()
+    if question_type not in REVIEW_QUESTION_TYPES:
+        question_type = "any"
+
+    unattended = str(source.get("unattended_action") or "hold").strip().lower()
+    if unattended not in UNATTENDED_ACTIONS:
+        unattended = "hold"
+
+    keyword_allow = bool(source.get("keyword_allow", True))
+    keywords = normalize_id_list(source.get("keywords")) if keyword_allow else []
+
+    return {
+        "enabled": bool(source.get("enabled", False)),
+        "blacklist_reject": bool(source.get("blacklist_reject", True)),
+        "sibling_group_ids": normalize_id_list(source.get("sibling_group_ids")),
+        "keyword_allow": keyword_allow,
+        "keywords": keywords,
+        "question_type": question_type,
+        "min_account_level": min_level,
+        "manual_confirm": bool(source.get("manual_confirm", True)),
+        "unattended_action": unattended,
+        "reject_reason": (
+            str(source.get("reject_reason") or DEFAULT_REVIEW_REJECT_REASON).strip()
+            or DEFAULT_REVIEW_REJECT_REASON
+        ),
+    }
+
+
+def normalize_review_overrides(raw: Any) -> dict[str, dict[str, Any]]:
+    """Normalize the per-group join review overrides.
+
+    Args:
+        raw: Raw ``review_overrides`` template list.
+
+    Returns:
+        Mapping from QQ group id to a fully normalized review policy. Entries
+        without a group id are skipped; when a group id repeats, the first entry
+        wins and a warning is logged.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            logger.warning(f"[QQAdmin] 按群审核设置第 {index + 1} 项不是对象，已忽略")
+            continue
+        group_id = str(item.get("group_id") or "").strip()
+        if not group_id:
+            logger.warning(f"[QQAdmin] 按群审核设置第 {index + 1} 项未填写群号，已忽略")
+            continue
+        if group_id in result:
+            logger.warning(
+                f"[QQAdmin] 群 {group_id} 的按群审核设置重复，以先出现的为准"
+            )
+            continue
+        result[group_id] = normalize_review_policy(item)
+    return result
+
+
+def normalize_group_settings(raw: Any) -> dict[str, Any]:
+    """Normalize the per-group behaviour settings of a group set.
+
+    Every group set carries its own ban duration, blacklist policy and join
+    review policy, so features can differ between groups that are managed by
+    the same plugin instance.
+
+    Args:
+        raw: Raw ``group_set`` entry from the plugin configuration.
+
+    Returns:
+        A dict with ``default_ban_duration`` (seconds), ``blacklist`` and
+        ``join_review`` sub-dicts. Missing or malformed values fall back to the
+        built-in defaults.
+    """
+    source = raw if isinstance(raw, dict) else {}
+    raw_blacklist = source.get("blacklist")
+    raw_blacklist = raw_blacklist if isinstance(raw_blacklist, dict) else {}
+
+    duration = parse_duration(
+        str(source.get("default_ban_duration") or ""),
+        DEFAULT_BAN_DURATION,
+    )
+
+    return {
+        "default_ban_duration": duration or DEFAULT_BAN_DURATION,
+        "blacklist": {
+            "enabled": bool(raw_blacklist.get("enabled", True)),
+            "default_reason": (
+                str(
+                    raw_blacklist.get("default_reason") or DEFAULT_BLACKLIST_REASON,
+                ).strip()
+                or DEFAULT_BLACKLIST_REASON
+            ),
+            "block_message": bool(raw_blacklist.get("block_message", False)),
+            "kick_on_add": bool(raw_blacklist.get("kick_on_add", False)),
+        },
+        "join_review": normalize_review_policy(source.get("join_review")),
+    }
+
+
 def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
     """Normalize the ``group_sets`` configuration into a predictable shape.
 
@@ -167,8 +324,9 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
 
     Returns:
         A list of dicts with the keys ``name``, ``group_ids``,
-        ``manage_session`` and ``notice_enabled``. Entries without a name and
-        without any group id are skipped.
+        ``manage_session``, ``notice_enabled`` and the per-group behaviour
+        settings produced by :func:`normalize_group_settings`. Entries without a
+        name and without any group id are skipped.
     """
     if not isinstance(raw, (list, tuple)):
         return []
@@ -192,6 +350,7 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
                 "group_ids": group_ids,
                 "manage_session": str(item.get("manage_session") or "").strip(),
                 "notice_enabled": bool(item.get("notice_enabled", True)),
+                **normalize_group_settings(item),
             }
         )
     return result
@@ -253,6 +412,49 @@ def find_group_set(
         if group_id in group_set["group_ids"]:
             return group_set
     return None
+
+
+def group_settings(
+    group_sets: list[dict[str, Any]],
+    group_id: str,
+) -> dict[str, Any]:
+    """Resolve the behaviour settings that apply to a group.
+
+    Args:
+        group_sets: Output of :func:`normalize_group_sets`.
+        group_id: QQ group id.
+
+    Returns:
+        The owning group set (which carries ``default_ban_duration``,
+        ``blacklist`` and ``join_review``), or :data:`DEFAULT_GROUP_SETTINGS`
+        for groups outside every set. The mapping is read-only for callers.
+    """
+    group_set = find_group_set(group_sets, group_id)
+    return group_set if group_set else DEFAULT_GROUP_SETTINGS
+
+
+def review_settings(
+    group_sets: list[dict[str, Any]],
+    overrides: dict[str, dict[str, Any]],
+    group_id: str,
+) -> dict[str, Any]:
+    """Resolve the join review policy that applies to a group.
+
+    The precedence is: per-group override, then the owning group set's policy,
+    then the built-in defaults.
+
+    Args:
+        group_sets: Output of :func:`normalize_group_sets`.
+        overrides: Output of :func:`normalize_review_overrides`.
+        group_id: QQ group id.
+
+    Returns:
+        The review policy for the group. Read-only for callers.
+    """
+    override = overrides.get(group_id)
+    if override is not None:
+        return override
+    return group_settings(group_sets, group_id)["join_review"]
 
 
 def blacklist_scope(group_id: str) -> str:

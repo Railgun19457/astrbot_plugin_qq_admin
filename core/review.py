@@ -8,10 +8,11 @@ plugin listens for every message event and inspects
 Decision order for a group join request:
 
 1. blacklist hit -> reject
-2. account level below the configured minimum -> reject
-3. keyword rule match -> approve
-4. ``manual_confirm`` on -> notify the manage session and wait for an operator
-5. otherwise -> fall back to ``unattended_action``
+2. already a member of a sibling group -> approve
+3. account level below the configured minimum -> reject
+4. keyword match -> approve
+5. ``manual_confirm`` on -> notify the manage session and wait for an operator
+6. otherwise -> fall back to ``unattended_action``
 
 The pending queue is persisted so that a restart does not silently drop
 requests that a human still has to decide on, and so that the opaque ``flag``
@@ -25,12 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
-
+from .config import UNATTENDED_ACTIONS
 from .store import JsonStore
-
-#: Actions an unattended request may fall back to.
-UNATTENDED_ACTIONS: tuple[str, ...] = ("hold", "reject", "approve")
 
 #: Request sub types that mean "this user wants to join the group".
 GROUP_REQUEST_SUBTYPES: frozenset[str] = frozenset({"add", "invite"})
@@ -115,78 +112,6 @@ class ReviewDecision:
     detail: str = ""
 
 
-@dataclass
-class KeywordRule:
-    """A configured keyword rule.
-
-    Attributes:
-        group_id: Group the rule applies to; empty means "every group".
-        keywords: Any of these substrings in the answer triggers a match.
-        question_type: ``any``, ``add`` or ``invite``.
-    """
-
-    group_id: str
-    keywords: list[str]
-    question_type: str = "any"
-
-    def matches(self, request: JoinRequest) -> bool:
-        """Check whether the rule applies to a request.
-
-        Args:
-            request: The join request under evaluation.
-
-        Returns:
-            ``True`` when the group, question type and keywords all match.
-        """
-        if self.group_id and self.group_id != request.group_id:
-            return False
-        if self.question_type != "any" and self.question_type != request.sub_type:
-            return False
-        if not self.keywords:
-            return False
-        answer = request.comment.lower()
-        return any(word.lower() in answer for word in self.keywords)
-
-
-def normalize_keyword_rules(raw: Any) -> list[KeywordRule]:
-    """Normalize the ``join_review.keyword_rules`` configuration.
-
-    Args:
-        raw: Raw value from the plugin configuration.
-
-    Returns:
-        Parsed rules; entries without keywords are skipped.
-    """
-    if not isinstance(raw, (list, tuple)):
-        return []
-
-    rules: list[KeywordRule] = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            logger.warning(f"[QQAdmin] 关键词规则第 {index + 1} 项不是对象，已忽略")
-            continue
-        keywords_raw = item.get("keywords")
-        keywords: list[str] = []
-        if isinstance(keywords_raw, (list, tuple)):
-            keywords = [str(word).strip() for word in keywords_raw if str(word).strip()]
-        elif isinstance(keywords_raw, str) and keywords_raw.strip():
-            keywords = [keywords_raw.strip()]
-        if not keywords:
-            continue
-
-        question_type = str(item.get("question_type") or "any").strip().lower()
-        if question_type not in ("any", *GROUP_REQUEST_SUBTYPES):
-            question_type = "any"
-        rules.append(
-            KeywordRule(
-                group_id=str(item.get("group_id") or "").strip(),
-                keywords=keywords,
-                question_type=question_type,
-            )
-        )
-    return rules
-
-
 def parse_request_event(raw: Any) -> JoinRequest | None:
     """Extract a group join request from a raw adapter event.
 
@@ -225,9 +150,11 @@ def evaluate(
     request: JoinRequest,
     *,
     is_blacklisted: bool,
+    is_sibling_member: bool,
     account_level: int | None,
     min_account_level: int,
-    keyword_rules: list[KeywordRule],
+    keywords: list[str],
+    question_type: str,
     manual_confirm: bool,
     unattended_action: str,
 ) -> ReviewDecision:
@@ -236,10 +163,14 @@ def evaluate(
     Args:
         request: The request under evaluation.
         is_blacklisted: Whether the applicant is on the group's blacklist.
+        is_sibling_member: Whether the applicant already belongs to another
+            group of the same group set.
         account_level: Applicant's QQ level, or ``None`` when the protocol
             implementation does not expose it.
         min_account_level: Lowest acceptable level; ``0`` disables the check.
-        keyword_rules: Configured keyword rules.
+        keywords: Answers that approve the request when matched.
+        question_type: ``any``, ``add`` or ``invite``; limits the keyword check
+            to one kind of request.
         manual_confirm: Whether unmatched requests are escalated to a human.
         unattended_action: Fallback when ``manual_confirm`` is off.
 
@@ -248,6 +179,9 @@ def evaluate(
     """
     if is_blacklisted:
         return ReviewDecision("reject", "blacklist", "申请人在黑名单中")
+
+    if is_sibling_member:
+        return ReviewDecision("approve", "sibling", "申请人已是同组其他群的成员")
 
     if (
         min_account_level > 0
@@ -260,10 +194,12 @@ def evaluate(
             f"QQ 等级 {account_level} 低于要求的 {min_account_level}",
         )
 
-    for rule in keyword_rules:
-        if rule.matches(request):
+    applies = question_type in ("any", request.sub_type)
+    if applies and keywords:
+        answer = request.comment.lower()
+        if any(word.lower() in answer for word in keywords):
             return ReviewDecision(
-                "approve", "keyword", f"命中关键词规则：{rule.keywords}"
+                "approve", "keyword", f"命中关键词：{'、'.join(keywords)}"
             )
 
     if manual_confirm:

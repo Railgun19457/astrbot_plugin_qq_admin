@@ -27,18 +27,19 @@ from .core.audit import AuditLog
 from .core.blacklist import BlacklistStore
 from .core.config import (
     CAPABILITY_KEYS,
-    DEFAULT_BAN_DURATION,
     MAX_BAN_DURATION,
     build_group_index,
     find_group_set,
     format_duration,
+    group_settings,
     is_all_target,
     normalize_bool_list,
     normalize_group_sets,
     normalize_permission_level,
+    normalize_review_overrides,
     normalize_words,
-    parse_duration,
     resolve_blacklist_scope,
+    review_settings,
 )
 from .core.confirm import ConfirmManager, PendingAction
 from .core.export import Exporter, to_file_uri
@@ -55,7 +56,6 @@ from .core.permission import (
 from .core.review import (
     PendingReviewStore,
     evaluate,
-    normalize_keyword_rules,
     parse_request_event,
 )
 from .core.tools import TOOL_NAMES, build_tools, log_registered
@@ -98,6 +98,7 @@ class QQAdminPlugin(Star):
         confirm: High-risk action confirmation manager.
         group_sets: Normalized group set definitions.
         group_index: ``group_id -> set name`` lookup.
+        review_overrides: ``group_id -> review policy`` per-group overrides.
         permission_settings: Parsed permission policy.
         templates: Message template mapping.
     """
@@ -230,11 +231,26 @@ class QQAdminPlugin(Star):
     def _load_config(self, config: AstrBotConfig) -> None:
         """Parse the configuration into normalized structures.
 
+        Settings that only make sense per group (ban duration, blacklist and
+        join review policy) live inside ``group_sets``, with an optional
+        per-group review override on top; they are resolved per group through
+        :meth:`_policy` and :meth:`_review_policy`. Only plugin-wide settings
+        are parsed here.
+
         Args:
             config: Raw plugin configuration.
         """
         self.group_sets = normalize_group_sets(config.get("group_sets"))
         self.group_index = build_group_index(self.group_sets)
+        self.review_overrides = normalize_review_overrides(
+            config.get("review_overrides"),
+        )
+        for group_id in self.review_overrides:
+            if group_id not in self.group_index:
+                logger.warning(
+                    f"[QQAdmin] 按群审核设置中的群 {group_id} 未加入任何群组，"
+                    "该设置不会生效",
+                )
 
         permissions = config.get("permissions")
         permissions = permissions if isinstance(permissions, dict) else {}
@@ -259,8 +275,6 @@ class QQAdminPlugin(Star):
         audit_conf = audit_conf if isinstance(audit_conf, dict) else {}
         confirm_conf = config.get("confirm")
         confirm_conf = confirm_conf if isinstance(confirm_conf, dict) else {}
-        blacklist_conf = config.get("blacklist")
-        blacklist_conf = blacklist_conf if isinstance(blacklist_conf, dict) else {}
 
         export_conf = config.get("export")
         export_conf = export_conf if isinstance(export_conf, dict) else {}
@@ -270,37 +284,6 @@ class QQAdminPlugin(Star):
         )
         self._audit_enabled = bool(audit_conf.get("enabled", True))
         self._audit_retention_days = int(audit_conf.get("retention_days", 30))
-
-        self._blacklist_enabled = bool(blacklist_conf.get("enabled", True))
-        self._block_blacklisted_message = bool(
-            blacklist_conf.get("block_message", False),
-        )
-        self.blacklist_default_reason = (
-            str(blacklist_conf.get("default_reason") or "未填写原因").strip()
-            or "未填写原因"
-        )
-
-        review_conf = config.get("join_review")
-        review_conf = review_conf if isinstance(review_conf, dict) else {}
-        self._review_enabled = bool(review_conf.get("enabled", False))
-        self._review_keyword_allow = bool(review_conf.get("keyword_allow", True))
-        self._review_blacklist_reject = bool(review_conf.get("blacklist_reject", True))
-        self._review_min_level = max(
-            0, int(review_conf.get("min_account_level", 0) or 0)
-        )
-        self._review_manual_confirm = bool(review_conf.get("manual_confirm", True))
-        self._review_unattended = str(
-            review_conf.get("unattended_action") or "hold",
-        ).strip()
-        self._review_reject_reason = (
-            str(
-                review_conf.get("reject_reason") or "未通过进群审核",
-            ).strip()
-            or "未通过进群审核"
-        )
-        self._review_rules = normalize_keyword_rules(review_conf.get("keyword_rules"))
-        if not self._review_keyword_allow:
-            self._review_rules = []
 
         self._level_unsupported_warned = False
 
@@ -333,13 +316,6 @@ class QQAdminPlugin(Star):
             confirm_conf.get("require_for"),
         ) or ["kick", "whole_ban"]
 
-        self.default_ban_duration = parse_duration(
-            str(config.get("default_ban_duration", DEFAULT_BAN_DURATION)),
-            DEFAULT_BAN_DURATION,
-        )
-        if not self.default_ban_duration:
-            self.default_ban_duration = DEFAULT_BAN_DURATION
-
         raw_templates = config.get("templates")
         self.templates: dict[str, Any] = (
             raw_templates if isinstance(raw_templates, dict) else {}
@@ -353,7 +329,7 @@ class QQAdminPlugin(Star):
             enabled=self._audit_enabled,
             retention_days=self._audit_retention_days,
         )
-        self.blacklist = BlacklistStore(data_dir, enabled=self._blacklist_enabled)
+        self.blacklist = BlacklistStore(data_dir)
         self.pending_reviews = PendingReviewStore(data_dir)
         self.whole_ban = WholeBanStore(data_dir)
         self.exporter = Exporter(
@@ -749,11 +725,10 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        duration = (
-            parsed.duration if parsed.duration_specified else self.default_ban_duration
-        )
+        default_duration = self._policy(group_id)["default_ban_duration"]
+        duration = parsed.duration if parsed.duration_specified else default_duration
         if duration is None:
-            duration = self.default_ban_duration
+            duration = default_duration
 
         lines: list[str] = []
         for user_id in parsed.targets:
@@ -1379,11 +1354,27 @@ class QQAdminPlugin(Star):
         else:
             lines.append(f"  所属群组：无（{self._text('group_unconfigured')}）")
         lines.append(f"  已配置群组总数：{len(self.group_sets)}")
-        lines.append(f"  黑名单条目：{self.blacklist.count(self._scope(group_id))}")
+        policy = self._policy(group_id)
+        blacklist_policy = policy["blacklist"]
+        review_policy = self._review_policy(group_id)
         lines.append(
-            "  黑名单发言拦截："
-            f"{'已开启' if self._block_blacklisted_message else '已关闭'}",
+            f"  默认禁言时长：{format_duration(policy['default_ban_duration'])}",
         )
+        lines.append(
+            f"  黑名单：{'已启用' if blacklist_policy['enabled'] else '已关闭'}"
+            f" | 发言拦截：{'已开启' if blacklist_policy['block_message'] else '已关闭'}"
+            f" | 拉黑踢出：{'已开启' if blacklist_policy['kick_on_add'] else '已关闭'}",
+        )
+        review_line = (
+            f"  进群审核：{'已开启' if review_policy['enabled'] else '已关闭'}"
+        )
+        if group_id in self.review_overrides:
+            review_line += "（按群配置）"
+        sibling_ids = review_policy["sibling_group_ids"]
+        if review_policy["enabled"] and sibling_ids:
+            review_line += f" | 同组放行：{len(sibling_ids)} 个来源群"
+        lines.append(review_line)
+        lines.append(f"  黑名单条目：{self.blacklist.count(self._scope(group_id))}")
 
         conflicted = self._conflicting_groups()
         if conflicted:
@@ -1433,7 +1424,8 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        if not self._blacklist_enabled:
+        blacklist_policy = self._policy(group_id)["blacklist"]
+        if not blacklist_policy["enabled"]:
             # ``add`` cannot persist anything while the feature is off, so
             # reporting success here would be a lie.
             async for item in self._reply(event, self._text("blacklist_disabled")):
@@ -1454,9 +1446,10 @@ class QQAdminPlugin(Star):
             return
 
         duration = parsed.duration if parsed.duration_specified else 0
-        reason = parsed.reason or self.blacklist_default_reason
+        reason = parsed.reason or blacklist_policy["default_reason"]
         scope = self._scope(group_id)
 
+        auto_kick = blacklist_policy["kick_on_add"]
         lines: list[str] = []
         for user_id in parsed.targets:
             nickname = await self._resolve_member_name(event, group_id, user_id)
@@ -1488,6 +1481,38 @@ class QQAdminPlugin(Star):
                 reason=reason,
                 duration=duration or 0,
             )
+
+            if not auto_kick:
+                continue
+            kick = await self.client.set_group_kick(event, group_id, user_id)
+            if kick.ok:
+                lines.append(
+                    self._text(
+                        "kick_success",
+                        target_name=nickname,
+                        target_id=user_id,
+                    ),
+                )
+                self._log_action(
+                    "kick",
+                    operator,
+                    target=user_id,
+                    group_id=group_id,
+                    reason=reason,
+                    trigger="blacklist_auto",
+                )
+            else:
+                lines.append(await self._describe_failure(kick, user_id))
+                self._log_action(
+                    "kick",
+                    operator,
+                    target=user_id,
+                    group_id=group_id,
+                    result="failed",
+                    error=kick.error,
+                    reason=reason,
+                    trigger="blacklist_auto",
+                )
 
         async for item in self._reply(
             event,
@@ -1604,6 +1629,11 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
+        if not self._policy(group_id)["blacklist"]["enabled"]:
+            async for item in self._reply(event, self._text("blacklist_disabled")):
+                yield item
+            return
+
         scope = self._scope(group_id)
         entries = self.blacklist.list_entries(scope)
         if not entries:
@@ -1651,6 +1681,35 @@ class QQAdminPlugin(Star):
         """
         return resolve_blacklist_scope(self.group_sets, group_id)
 
+    def _policy(self, group_id: str) -> dict[str, Any]:
+        """Resolve the behaviour settings of a group.
+
+        Args:
+            group_id: QQ group id.
+
+        Returns:
+            A mapping with ``default_ban_duration``, ``blacklist`` and
+            ``join_review``. Groups outside every set get the built-in
+            defaults, so features keep working on unconfigured groups.
+        """
+        return group_settings(self.group_sets, group_id)
+
+    def _review_policy(self, group_id: str) -> dict[str, Any]:
+        """Resolve the join review policy of a group.
+
+        Args:
+            group_id: QQ group id.
+
+        Returns:
+            The per-group override when one is configured, otherwise the
+            policy of the group's group set (or the built-in default).
+        """
+        return review_settings(
+            self.group_sets,
+            self.review_overrides,
+            group_id,
+        )
+
     def _conflicting_groups(self) -> list[str]:
         """List group ids appearing in more than one group set.
 
@@ -1679,7 +1738,7 @@ class QQAdminPlugin(Star):
         Args:
             event: The incoming group message event.
         """
-        if not self.enabled or not self._block_blacklisted_message:
+        if not self.enabled:
             return
         if event.get_platform_name() != SUPPORTED_PLATFORM:
             return
@@ -1687,6 +1746,10 @@ class QQAdminPlugin(Star):
         group_id = str(event.get_group_id() or "")
         user_id = str(event.get_sender_id() or "")
         if not group_id or not user_id or user_id == str(event.get_self_id() or ""):
+            return
+
+        blacklist_policy = self._policy(group_id)["blacklist"]
+        if not blacklist_policy["enabled"] or not blacklist_policy["block_message"]:
             return
 
         scope = self._scope(group_id)
@@ -1734,7 +1797,7 @@ class QQAdminPlugin(Star):
         Args:
             event: The incoming adapter event.
         """
-        if not self.enabled or not self._review_enabled:
+        if not self.enabled:
             return
         if event.get_platform_name() != SUPPORTED_PLATFORM:
             return
@@ -1772,24 +1835,45 @@ class QQAdminPlugin(Star):
             )
             return
 
+        policy = self._policy(request.group_id)
+        review_policy = self._review_policy(request.group_id)
+        if not review_policy["enabled"]:
+            return
+
         scope = self._scope(request.group_id)
         is_blacklisted = (
-            self._review_blacklist_reject
+            policy["blacklist"]["enabled"]
+            and review_policy["blacklist_reject"]
             and self.blacklist.is_blacklisted(
                 scope,
                 request.user_id,
             )
         )
-        level = await self._account_level(event, request)
+        sibling_group_ids = review_policy["sibling_group_ids"]
+        is_sibling_member = (
+            await self._member_of_sibling_group(event, request, sibling_group_ids)
+            if sibling_group_ids
+            else False
+        )
+        min_level = review_policy["min_account_level"]
+        # A known sibling member is approved before the level gate, so the
+        # extra protocol call would be wasted.
+        level = (
+            None
+            if is_sibling_member
+            else await self._account_level(event, request, min_level)
+        )
 
         decision = evaluate(
             request,
             is_blacklisted=is_blacklisted,
+            is_sibling_member=is_sibling_member,
             account_level=level,
-            min_account_level=self._review_min_level,
-            keyword_rules=self._review_rules,
-            manual_confirm=self._review_manual_confirm,
-            unattended_action=self._review_unattended,
+            min_account_level=min_level,
+            keywords=review_policy["keywords"],
+            question_type=review_policy["question_type"],
+            manual_confirm=review_policy["manual_confirm"],
+            unattended_action=review_policy["unattended_action"],
         )
         logger.info(
             f"[QQAdmin] 进群申请 群{request.group_id} 用户{request.user_id} "
@@ -1803,23 +1887,66 @@ class QQAdminPlugin(Star):
 
         await self._notify_review(event, group_set, request, decision)
 
+    async def _member_of_sibling_group(
+        self,
+        event: AstrMessageEvent,
+        request: Any,
+        group_ids: list[str],
+    ) -> bool:
+        """Check whether the applicant already belongs to one of the source groups.
+
+        The candidate groups come from ``join_review.sibling_group_ids``, so an
+        operator can pick exactly which sibling groups grant a pass instead of
+        trusting every group in the set. The target group itself is ignored.
+
+        Args:
+            event: Event providing the OneBot connection.
+            request: The join request under evaluation.
+            group_ids: Groups whose membership qualifies for a pass.
+
+        Returns:
+            ``True`` when the protocol confirms membership of one of them.
+        """
+        for group_id in group_ids:
+            if group_id == request.group_id:
+                continue
+            result = await self.client.call_action(
+                event,
+                "_get_group_member_info",
+                group_id=group_id,
+                user_id=request.user_id,
+                no_cache=True,
+            )
+            if not result.ok or not isinstance(result.data, dict):
+                continue
+            if str(result.data.get("user_id") or "") == request.user_id:
+                logger.info(
+                    f"[QQAdmin] 申请人 {request.user_id} 已是群 {group_id} 的成员，"
+                    f"申请加入群 {request.group_id} 时按同组放行",
+                )
+                return True
+        return False
+
     async def _account_level(
         self,
         event: AstrMessageEvent,
         request: Any,
+        min_level: int,
     ) -> int | None:
         """Look up an applicant's QQ level.
 
         Args:
             event: Event providing the OneBot connection.
             request: The join request.
+            min_level: Configured minimum for the group; ``0`` skips the lookup
+                entirely.
 
         Returns:
             The level, or ``None`` when the protocol implementation does not
             expose it (the ``level`` field comes from the private
             ``_get_group_member_info`` action).
         """
-        if self._review_min_level <= 0:
+        if min_level <= 0:
             return None
 
         result = await self.client.call_action(
@@ -1865,11 +1992,12 @@ class QQAdminPlugin(Star):
             return False
 
         approve = action == "approve"
+        reject_reason = self._review_policy(request.group_id)["reject_reason"]
         result = await self.client.set_group_add_request(
             event,
             request.flag,
             approve=approve,
-            reason="" if approve else self._review_reject_reason,
+            reason="" if approve else reject_reason,
         )
         self.audit.log(
             f"review_{action}",

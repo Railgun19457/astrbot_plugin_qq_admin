@@ -635,14 +635,15 @@ class QqBlacklistAddTool(_PluginTool):
         if not allowed:
             return _denied(plugin, deny)
 
-        if not plugin._blacklist_enabled:
+        blacklist_policy = plugin._policy(group_id)["blacklist"]
+        if not blacklist_policy["enabled"]:
             return "error: " + render_template(plugin.templates, "blacklist_disabled")
 
         target, error = await self.resolve_target(event, user_id)
         if error:
             return error
 
-        final_reason = str(reason or "").strip() or plugin.blacklist_default_reason
+        final_reason = str(reason or "").strip() or blacklist_policy["default_reason"]
         raw_duration = _safe_int(duration_seconds)
         if raw_duration is None:
             return "error: duration_seconds 必须是整数秒数，0 或省略表示永久"
@@ -667,7 +668,7 @@ class QqBlacklistAddTool(_PluginTool):
             reason=final_reason,
             duration=duration,
         )
-        return render_template(
+        text = render_template(
             plugin.templates,
             "blacklist_added",
             target_name=name,
@@ -675,6 +676,41 @@ class QqBlacklistAddTool(_PluginTool):
             reason=final_reason,
             duration=format_duration(duration) if entry.is_temporary else "永久",
         )
+        if not blacklist_policy["kick_on_add"]:
+            return text
+
+        kick = await plugin.client.set_group_kick(event, group_id, target)
+        if kick.ok:
+            plugin._tool_audit(
+                "kick",
+                event,
+                target=target,
+                group_id=group_id,
+                reason=final_reason,
+                trigger="blacklist_auto",
+            )
+            return (
+                text
+                + "\n"
+                + render_template(
+                    plugin.templates,
+                    "kick_success",
+                    target_name=name,
+                    target_id=target,
+                )
+            )
+
+        plugin._tool_audit(
+            "kick",
+            event,
+            target=target,
+            group_id=group_id,
+            result="failed",
+            error=kick.error,
+            reason=final_reason,
+            trigger="blacklist_auto",
+        )
+        return text + "\n" + _failed(plugin, kick.error, unsupported=kick.unsupported)
 
 
 @dataclass
@@ -772,6 +808,9 @@ class QqBlacklistQueryTool(_PluginTool):
         allowed, deny = await plugin._tool_permission(event, "query")
         if not allowed:
             return _denied(plugin, deny)
+
+        if not plugin._policy(group_id)["blacklist"]["enabled"]:
+            return "error: " + render_template(plugin.templates, "blacklist_disabled")
 
         scope = plugin._scope(group_id)
         entries = plugin.blacklist.list_entries(scope)
