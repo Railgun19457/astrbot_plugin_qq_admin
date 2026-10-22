@@ -1,7 +1,10 @@
-"""Notification routing.
+"""Notification routing and receipt delivery.
 
-A group set may declare a *manage session* that receives review notifications
-and optionally the operation receipts. The value is a ``unified_msg_origin``
+Each routable message category (operation receipts, join review notices) can be
+delivered to the session the action happened in, to the *manage session* of the
+owning group set, to both, or to neither.
+
+A manage session is declared per group set and holds a ``unified_msg_origin``
 (UMO) such as ``aiocqhttp:GroupMessage:123456``, which can be copied from the
 ``/sid`` command in the target session. The UMO already embeds the message
 type, so group chats and private chats are configured the same way and the
@@ -10,28 +13,12 @@ platform instance id does not have to be hard-coded.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from astrbot.api import logger
 
 if TYPE_CHECKING:
-    from astrbot.api.event import AstrMessageEvent
     from astrbot.api.star import Context
-
-
-@dataclass
-class SessionTarget:
-    """A resolved destination for a proactive message.
-
-    Attributes:
-        value: ``unified_msg_origin`` string, ready for ``context.send_message``.
-    """
-
-    value: str
-
-    def __str__(self) -> str:
-        return self.value
 
 
 def parse_manage_session(raw: str) -> str | None:
@@ -59,96 +46,92 @@ def parse_manage_session(raw: str) -> str | None:
 
 
 class Notifier:
-    """Sends proactive messages to the right session.
+    """Resolves where a notification category is delivered.
 
     Attributes:
         _context: AstrBot context used for outbound messages.
-        _receipt_to_manage_session: Whether operation receipts are mirrored to
-            the manage session in addition to the originating group.
-        _receipt_enabled: Whether operation receipts are sent at all.
+        _to_current: Categories delivered to the session of the event.
+        _to_manage: Categories delivered to the manage session.
     """
 
     def __init__(
         self,
         context: Context,
         *,
-        receipt_enabled: bool = True,
-        receipt_to_manage_session: bool = False,
+        to_current: list[str],
+        to_manage: list[str],
     ) -> None:
         """Store the routing policy.
 
         Args:
             context: AstrBot context.
-            receipt_enabled: Whether command handlers send receipts at all.
-            receipt_to_manage_session: Mirror receipts into the manage session.
+            to_current: Categories routed to the current session.
+            to_manage: Categories routed to the manage session.
         """
         self._context = context
-        self._receipt_enabled = bool(receipt_enabled)
-        self._receipt_to_manage_session = bool(receipt_to_manage_session)
+        self._to_current = set(to_current)
+        self._to_manage = set(to_manage)
 
-    @property
-    def receipt_enabled(self) -> bool:
-        """Whether operation receipts should be produced."""
-        return self._receipt_enabled
-
-    @property
-    def mirror_receipts(self) -> bool:
-        """Whether receipts are also sent to the manage session."""
-        return self._receipt_to_manage_session
-
-    def resolve_target(
+    def targets(
         self,
-        event: AstrMessageEvent,
-        group_set: dict[str, Any] | None,
-    ) -> SessionTarget:
-        """Resolve where a group-set notification should go.
+        category: str,
+        *,
+        origin: str,
+        manage_session: str = "",
+    ) -> list[str]:
+        """Resolve the destinations of one notification.
+
+        A category routed to the manage session without a usable manage session
+        configured falls back to the current session, so enabling the route can
+        never make a notification disappear silently.
 
         Args:
-            event: Event whose session is used as the fallback destination.
-            group_set: Owning group set, or ``None`` when the group is
-                unconfigured.
+            category: One of ``config.NOTIFY_CATEGORIES``.
+            origin: ``unified_msg_origin`` of the session the action happened
+                in.
+            manage_session: Raw ``manage_session`` value of the owning group
+                set, empty when the group belongs to no set.
 
         Returns:
-            The manage session when configured and resolvable, otherwise the
-            originating group as a fallback.
+            De-duplicated UMOs in delivery order. Empty when the category is
+            enabled on neither target.
         """
-        if group_set:
-            umo = parse_manage_session(group_set.get("manage_session", ""))
-            if umo:
-                return SessionTarget(umo)
+        origin = str(origin or "")
+        destinations: list[str] = []
 
-        return SessionTarget(
-            value=str(getattr(event, "unified_msg_origin", "") or ""),
-        )
+        if category in self._to_current and origin:
+            destinations.append(origin)
 
-    async def send_to_session(
-        self,
-        target: SessionTarget,
-        text: str,
-    ) -> bool:
-        """Send a message to a resolved target.
+        if category in self._to_manage:
+            fallback = parse_manage_session(manage_session) or origin
+            if fallback and fallback not in destinations:
+                destinations.append(fallback)
+
+        return destinations
+
+    async def send_to_session(self, target: str, text: str) -> bool:
+        """Send a proactive message to a resolved destination.
 
         Args:
-            target: Destination resolved by :meth:`resolve_target` or built by
-                the caller.
+            target: UMO returned by :meth:`targets`.
             text: Message body.
 
         Returns:
             ``True`` when the message was handed to a platform adapter.
         """
-        if not text or not target.value:
+        if not text or not target:
             return False
 
         from astrbot.core.message.message_event_result import MessageChain
 
         try:
             sent = await self._context.send_message(
-                target.value,
+                target,
                 MessageChain().message(text),
             )
         except Exception as exc:  # noqa: BLE001 - notification must not crash
-            logger.warning(f"[QQAdmin] 发送通知到 {target.value} 失败：{exc}")
+            logger.warning(f"[QQAdmin] 发送通知到 {target} 失败：{exc}")
             return False
         if not sent:
-            logger.warning(f"[QQAdmin] 未找到会话 {target.value}，通知未发送")
+            logger.warning(f"[QQAdmin] 未找到会话 {target}，通知未发送")
         return bool(sent)

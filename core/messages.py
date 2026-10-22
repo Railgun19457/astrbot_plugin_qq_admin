@@ -48,6 +48,14 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "review_empty": "当前没有待审核的进群申请",
     "review_bad_index": "编号超出范围（当前共 {count} 条）",
     "review_decided": "已{action} {user_id} 加入群 {group_id} 的申请",
+    "review_pending_hint": "回复「审核 同意 {index}」或「审核 拒绝 {index}」处理该申请",
+    "manage_unsupported": (
+        "该指令需要在目标群内执行。管理会话仅支持：审核、黑名单、拉黑、解除拉黑、群管状态"
+    ),
+    "manage_ambiguous": (
+        "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"
+    ),
+    "group_not_found": "未找到群组：{selector}",
     "member_header": "本群共 {count} 人（第 {page} 页）：",
     "member_list_failed": "无法获取群成员列表，请稍后重试",
     "export_success": "已导出{kind}表格（{count} 条）并上传到群文件",

@@ -50,7 +50,7 @@
           "manage_session": {
             "type": "string",
             "description": "管理会话",
-            "hint": "接收审核通知的会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456；留空则发到申请所在群",
+            "hint": "群管理员专用的会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456。审核通知默认发到这里，其中的「审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态」对该群组生效；留空则通知发到申请所在群，且只能在各群内管理",
             "default": ""
           },
           "notice_enabled": {
@@ -398,18 +398,31 @@
   },
   "notify": {
     "type": "object",
-    "description": "通知设置",
+    "description": "通知与回执",
+    "hint": "每项内容可以分别选择发到当前会话、发到群组配置的管理会话，或两者都发；两个都不勾选则不发",
     "items": {
-      "operation_receipt": {
-        "type": "bool",
-        "description": "操作回执发到触发群",
-        "default": true
+      "to_current_session": {
+        "type": "list",
+        "description": "发到当前会话",
+        "options": [
+          "操作回执",
+          "进群审核通知"
+        ],
+        "default": [
+          "操作回执"
+        ]
       },
-      "receipt_to_manage_session": {
-        "type": "bool",
-        "description": "操作回执同时发到管理会话",
-        "hint": "需在群组里配置管理会话；与当前会话相同时不会重复发送",
-        "default": false
+      "to_manage_session": {
+        "type": "list",
+        "description": "发到管理会话",
+        "hint": "需在群组里配置管理会话；未配置时自动改发当前会话",
+        "options": [
+          "操作回执",
+          "进群审核通知"
+        ],
+        "default": [
+          "进群审核通知"
+        ]
       }
     }
   },
@@ -602,6 +615,29 @@
         "description": "人工审核完成",
         "hint": "可用占位符：{action} {user_id} {group_id}",
         "default": "已{action} {user_id} 加入群 {group_id} 的申请"
+      },
+      "review_pending_hint": {
+        "type": "text",
+        "description": "待人工确认提示",
+        "hint": "可用占位符：{index}",
+        "default": "回复「审核 同意 {index}」或「审核 拒绝 {index}」处理该申请"
+      },
+      "manage_unsupported": {
+        "type": "text",
+        "description": "管理会话不支持该指令",
+        "default": "该指令需要在目标群内执行。管理会话仅支持：审核、黑名单、拉黑、解除拉黑、群管状态"
+      },
+      "manage_ambiguous": {
+        "type": "text",
+        "description": "管理会话对应多个群组",
+        "hint": "可用占位符：{names}",
+        "default": "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"
+      },
+      "group_not_found": {
+        "type": "text",
+        "description": "找不到指定群组",
+        "hint": "可用占位符：{selector}",
+        "default": "未找到群组：{selector}"
       },
       "member_header": {
         "type": "text",

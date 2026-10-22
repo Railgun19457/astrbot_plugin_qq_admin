@@ -83,6 +83,16 @@ GROUP_PRIVILEGED_ROLES: frozenset[str] = frozenset({"owner", "admin"})
 #: Special argument meaning "everyone in this group".
 ALL_TARGET_KEYWORD = "全体"
 
+#: Message categories whose delivery route can be configured per session.
+NOTIFY_CATEGORY_RECEIPT = "操作回执"
+NOTIFY_CATEGORY_REVIEW = "进群审核通知"
+
+#: Every routable category, in the order the WebUI offers them.
+NOTIFY_CATEGORIES: tuple[str, ...] = (
+    NOTIFY_CATEGORY_RECEIPT,
+    NOTIFY_CATEGORY_REVIEW,
+)
+
 _TIME_RE = re.compile(r"^(\d+)\s*([smhd])?$", re.IGNORECASE)
 
 
@@ -576,6 +586,56 @@ def find_group_set(
     return None
 
 
+def find_group_set_by_name(
+    group_sets: list[dict[str, Any]],
+    name: str,
+) -> dict[str, Any] | None:
+    """Find a group set by its display name.
+
+    Args:
+        group_sets: Output of :func:`normalize_group_sets`.
+        name: Group set name as configured.
+
+    Returns:
+        The matching group set, or ``None`` when the name is unknown.
+    """
+    target = str(name or "").strip()
+    if not target:
+        return None
+    for group_set in group_sets:
+        if str(group_set["name"]) == target:
+            return group_set
+    return None
+
+
+def manage_group_sets(
+    group_sets: list[dict[str, Any]],
+    umo: str,
+) -> list[dict[str, Any]]:
+    """List the group sets that use ``umo`` as their manage session.
+
+    A manage session is the control room of the sets that declare it: it may
+    run the review and blacklist commands for those sets even though it is not
+    one of their managed groups.
+
+    Args:
+        group_sets: Output of :func:`normalize_group_sets`.
+        umo: ``unified_msg_origin`` of the session.
+
+    Returns:
+        The owning group sets, in configuration order. Empty when the session
+        is not configured as a manage session.
+    """
+    target = str(umo or "").strip()
+    if not target:
+        return []
+    return [
+        group_set
+        for group_set in group_sets
+        if str(group_set.get("manage_session") or "") == target
+    ]
+
+
 def group_settings(
     group_sets: list[dict[str, Any]],
     group_id: str,
@@ -631,6 +691,36 @@ def resolve_blacklist_scope(
     if group_set:
         return str(group_set["name"])
     return blacklist_scope(group_id)
+
+
+def normalize_notify_routes(raw: Any) -> dict[str, list[str]]:
+    """Normalize the ``notify`` configuration into per-session category lists.
+
+    Every routable message category (see :data:`NOTIFY_CATEGORIES`) can be
+    delivered to the session the action happened in, to the manage session, to
+    both or to neither. Unknown categories are dropped so a stale config cannot
+    resurrect a removed one.
+
+    Args:
+        raw: Raw ``notify`` mapping from the plugin configuration.
+
+    Returns:
+        A dict with the keys ``current`` and ``manage``, each holding the
+        categories delivered to that session.
+    """
+    source = raw if isinstance(raw, dict) else {}
+    return {
+        "current": [
+            str(item)
+            for item in normalize_id_list(source.get("to_current_session"))
+            if item in NOTIFY_CATEGORIES
+        ],
+        "manage": [
+            str(item)
+            for item in normalize_id_list(source.get("to_manage_session"))
+            if item in NOTIFY_CATEGORIES
+        ],
+    }
 
 
 # ------------------------------------------------------------------ #

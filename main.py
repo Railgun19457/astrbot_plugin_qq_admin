@@ -29,14 +29,19 @@ from .core.config import (
     CAPABILITY_KEYS,
     DEFAULT_REVIEW_REJECT_REASON,
     MAX_BAN_DURATION,
+    NOTIFY_CATEGORY_RECEIPT,
+    NOTIFY_CATEGORY_REVIEW,
     build_group_index,
     find_group_set,
+    find_group_set_by_name,
     format_duration,
     group_review_policy,
     group_settings,
     is_all_target,
+    manage_group_sets,
     normalize_bool_list,
     normalize_group_sets,
+    normalize_notify_routes,
     normalize_permission_level,
     normalize_words,
     resolve_blacklist_scope,
@@ -273,6 +278,7 @@ class QQAdminPlugin(Star):
 
         notify = config.get("notify")
         notify = notify if isinstance(notify, dict) else {}
+        self.notify_routes = normalize_notify_routes(notify)
         audit_conf = config.get("audit")
         audit_conf = audit_conf if isinstance(audit_conf, dict) else {}
         confirm_conf = config.get("confirm")
@@ -280,10 +286,6 @@ class QQAdminPlugin(Star):
 
         export_conf = config.get("export")
         export_conf = export_conf if isinstance(export_conf, dict) else {}
-        self.receipt_enabled = bool(notify.get("operation_receipt", True))
-        self.receipt_to_manage_session = bool(
-            notify.get("receipt_to_manage_session", False),
-        )
         self._audit_enabled = bool(audit_conf.get("enabled", True))
         self._audit_retention_days = int(audit_conf.get("retention_days", 30))
 
@@ -341,8 +343,8 @@ class QQAdminPlugin(Star):
         )
         self.notifier = Notifier(
             self.context,
-            receipt_enabled=self.receipt_enabled,
-            receipt_to_manage_session=self.receipt_to_manage_session,
+            to_current=self.notify_routes["current"],
+            to_manage=self.notify_routes["manage"],
         )
         self._register_tools()
         self._build_confirm_manager()
@@ -423,25 +425,32 @@ class QQAdminPlugin(Star):
             self.permission_settings,
         )
 
-    def _should_skip(
+    async def _should_skip(
         self,
         event: AstrMessageEvent,
         *,
         require_configured: bool = True,
+        manage_ok: bool = False,
     ) -> bool:
         """Check the cheap preconditions shared by every command handler.
 
         Commands are silently ignored rather than answered when the plugin is
         disabled, when the adapter is not aiocqhttp (the OneBot actions this
-        plugin relies on do not exist elsewhere), or when the group is not part
-        of any configured group set. Bailing out here also avoids the extra
-        protocol calls that permission resolution would otherwise make.
+        plugin relies on do not exist elsewhere), or when the message does not
+        come from a group. Bailing out here also avoids the extra protocol calls
+        that permission resolution would otherwise make.
+
+        A manage session counts as a valid place to run the commands that make
+        sense there (``manage_ok``). For the others the event is stopped with a
+        short explanation, because leaving it alone would hand a group
+        management command to the LLM.
 
         Args:
             event: Event of the command.
             require_configured: Whether the command may only run in a group that
-                belongs to a group set. ``/审核`` opts out so it can be used
-                from a dedicated management group.
+                belongs to a group set. ``/审核`` opts out so it also works in a
+                dedicated management group that is not itself managed.
+            manage_ok: Whether the command is available inside a manage session.
 
         Returns:
             ``True`` when the handler must return without doing anything.
@@ -453,7 +462,87 @@ class QQAdminPlugin(Star):
         group_id = str(event.get_group_id() or "")
         if not group_id:
             return True
-        return require_configured and group_id not in self.group_index
+        if group_id in self.group_index:
+            return False
+        if not require_configured:
+            return False
+
+        if not self._manage_sets(event):
+            logger.info(
+                f"[QQAdmin] 群 {group_id} 未加入任何群组，已忽略该指令",
+            )
+            return True
+
+        if manage_ok:
+            return False
+
+        # A manage session is ours, but this command needs a concrete group.
+        await event.send(event.plain_result(self._text("manage_unsupported")))
+        event.stop_event()
+        event.should_call_llm(False)
+        return True
+
+    def _manage_sets(self, event: AstrMessageEvent) -> list[dict[str, Any]]:
+        """List the group sets that use this session as their manage session.
+
+        Args:
+            event: Event of the command.
+
+        Returns:
+            The owning group sets; empty when the session is an ordinary chat.
+        """
+        if event.get_platform_name() != SUPPORTED_PLATFORM:
+            return []
+        return manage_group_sets(
+            self.group_sets,
+            str(event.unified_msg_origin or ""),
+        )
+
+    def _select_group_set(
+        self,
+        event: AstrMessageEvent,
+        selector: str = "",
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Resolve which group set a blacklist command applies to.
+
+        Inside a managed group the owning set is implicit. In a manage session
+        the set that declared it is used, and an explicit selector (group id or
+        group set name) picks one when several sets share the session.
+
+        Args:
+            event: Event of the command.
+            selector: Optional group id or group set name from the arguments.
+
+        Returns:
+            ``(group_set, error)``; ``error`` is a user-facing message when the
+            selector is unknown or the manage session is ambiguous.
+        """
+        text = str(selector or "").strip()
+        if text:
+            target = find_group_set(self.group_sets, text) or find_group_set_by_name(
+                self.group_sets,
+                text,
+            )
+            if target is None:
+                return None, self._text("group_not_found", selector=text)
+            return target, ""
+
+        group_set = find_group_set(
+            self.group_sets,
+            str(event.get_group_id() or ""),
+        )
+        if group_set is not None:
+            return group_set, ""
+
+        bound = self._manage_sets(event)
+        if len(bound) == 1:
+            return bound[0], ""
+        if not bound:
+            return None, ""
+        return None, self._text(
+            "manage_ambiguous",
+            names="、".join(str(item["name"]) for item in bound),
+        )
 
     def _text(self, key: str, **values: Any) -> str:
         """Render a template with this plugin's configuration.
@@ -481,33 +570,42 @@ class QQAdminPlugin(Star):
         Args:
             event: Event to reply to.
             text: Message body. An empty string sends nothing.
-            stop: Whether to stop event propagation afterwards.
+            stop: Whether to stop event propagation afterwards. A stopped event
+                also keeps the message away from the default LLM request.
             receipt: Mark ``text`` as the outcome of an executed management
-                action. Such messages are withheld when
-                ``notify.operation_receipt`` is off, and mirrored into the
-                manage session when ``notify.receipt_to_manage_session`` is on.
-            group_id: Group the action happened in; used to resolve the manage
-                session of its group set when mirroring.
+                action. Receipts are routed by the ``notify`` configuration, so
+                they may be withheld from the current session, mirrored into the
+                manage session, or both.
+            group_id: Group the action happened in; selects the group set whose
+                manage session receives the mirrored receipt.
 
         Yields:
             The message result for the pipeline to deliver.
         """
-        mirror_text = text if receipt else ""
-        if text and (not receipt or self.notifier.receipt_enabled):
+        origin = str(event.unified_msg_origin or "")
+        mirror: list[str] = []
+        if text and receipt:
+            group_set = find_group_set(
+                self.group_sets,
+                group_id or str(event.get_group_id() or ""),
+            )
+            targets = self.notifier.targets(
+                NOTIFY_CATEGORY_RECEIPT,
+                origin=origin,
+                manage_session=str((group_set or {}).get("manage_session", "")),
+            )
+            if origin in targets:
+                yield event.plain_result(text)
+            mirror = [target for target in targets if target != origin]
+        elif text:
             yield event.plain_result(text)
 
-        if mirror_text and self.notifier.mirror_receipts and group_id:
-            target = self.notifier.resolve_target(
-                event,
-                find_group_set(self.group_sets, group_id),
-            )
-            # resolve_target falls back to the originating group; mirroring
-            # there would duplicate the receipt in the same session.
-            if target.value and target.value != str(event.unified_msg_origin or ""):
-                await self.notifier.send_to_session(target, mirror_text)
+        for target in mirror:
+            await self.notifier.send_to_session(target, text)
 
         if stop:
             event.stop_event()
+            event.should_call_llm(False)
 
     async def _resolve_member_name(
         self,
@@ -692,7 +790,7 @@ class QQAdminPlugin(Star):
             args: 后续参数，形如「@某人 10m 刷屏」或「全体 1h」，顺序任意。
                 允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event):
             return
         tokens = str(args or "").split()
         group_id = str(event.get_group_id())
@@ -914,7 +1012,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 后续参数，形如「@某人」或「全体」。允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event):
             return
         text = str(args or "").strip()
         group_id = str(event.get_group_id())
@@ -1040,7 +1138,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 后续参数，形如「@某人 广告」。允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event):
             return
         text = str(args or "").strip()
         group_id = str(event.get_group_id())
@@ -1146,7 +1244,7 @@ class QQAdminPlugin(Star):
         Args:
             event: 消息事件。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1223,7 +1321,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             content: 公告正文。允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1301,7 +1399,7 @@ class QQAdminPlugin(Star):
         Args:
             event: 消息事件。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event, manage_ok=True):
             return
         lines = [
             "QQ群管 指令列表",
@@ -1320,6 +1418,9 @@ class QQAdminPlugin(Star):
             "  审核 同意 / 拒绝 <编号>    处理指定申请",
             "  群管状态                   查看运行状态与群组归属",
             "",
+            "管理会话（群组配置里的「管理会话」）专供群管理员使用：进群审核通知、",
+            "审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态 均可直接在那里执行。",
+            "",
             "提示：指令与 @ 之间需要空格；时长与目标的位置可以互换；若与其他插件指令重名，",
             "可在 WebUI 的「插件 → 管理行为」中重命名。",
         ]
@@ -1335,7 +1436,7 @@ class QQAdminPlugin(Star):
         Args:
             event: 消息事件。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event, manage_ok=True):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1355,6 +1456,8 @@ class QQAdminPlugin(Star):
 
         group_set = find_group_set(self.group_sets, group_id)
         if group_set is None:
+            async for item in self._reply(event, self._manage_status(event)):
+                yield item
             return
         lines = [
             "QQ群管 运行状态",
@@ -1362,7 +1465,7 @@ class QQAdminPlugin(Star):
             f"  当前群：{group_id}",
             f"  所属群组：{group_set['name']}",
             f"  组内群数：{len(group_set['group_ids'])}",
-            f"  管理会话：{group_set['manage_session'] or '未配置（回退到当前群）'}",
+            f"  管理会话：{group_set['manage_session'] or '未配置（通知回退到当前群）'}",
             f"  已配置群组总数：{len(self.group_sets)}",
         ]
         policy = self._policy(group_id)
@@ -1398,6 +1501,36 @@ class QQAdminPlugin(Star):
         async for item in self._reply(event, "\n".join(lines)):
             yield item
 
+    def _manage_status(self, event: AstrMessageEvent) -> str:
+        """Render the status report of a manage session.
+
+        A manage session is not itself a managed group (or it would already be
+        handled by the per-group branch), so the report describes every group
+        set that declared this session as its control room.
+
+        Args:
+            event: Event of the command.
+
+        Returns:
+            The status text.
+        """
+        lines = [
+            "QQ群管 运行状态（管理会话）",
+            f"  插件：{'已启用' if self.enabled else '已禁用'}",
+            f"  当前会话：{event.unified_msg_origin}",
+            f"  已配置群组总数：{len(self.group_sets)}",
+        ]
+        for group_set in self._manage_sets(event):
+            review = group_set["join_review"]["policy"]
+            lines.append(
+                f"  群组「{group_set['name']}」："
+                f"群 {', '.join(group_set['group_ids']) or '（未填写群号）'}"
+                f" | 黑名单 {self.blacklist.count(str(group_set['name']))} 条"
+                f" | 进群审核 {'已开启' if review['enabled'] else '已关闭'}",
+            )
+        lines.append("  可用指令：审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------ #
     #  Commands: blacklist
     # ------------------------------------------------------------------ #
@@ -1416,7 +1549,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 后续参数，形如「@某人 发广告 7d」。允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event, manage_ok=True):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1434,7 +1567,15 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        blacklist_policy = self._policy(group_id)["blacklist"]
+        # In a manage session the owning group set is selected for us; inside a
+        # managed group it is the one the command was issued in.
+        group_set, error = self._select_group_set(event)
+        if error:
+            async for item in self._reply(event, error):
+                yield item
+            return
+
+        blacklist_policy = self._policy(group_id, group_set)["blacklist"]
         if not blacklist_policy["enabled"]:
             # ``add`` cannot persist anything while the feature is off, so
             # reporting success here would be a lie.
@@ -1457,9 +1598,13 @@ class QQAdminPlugin(Star):
 
         duration = parsed.duration if parsed.duration_specified else 0
         reason = parsed.reason or blacklist_policy["default_reason"]
-        scope = self._scope(group_id)
+        scope = self._scope(group_id, group_set)
 
-        auto_kick = blacklist_policy["kick_on_add"]
+        # Kicking only makes sense while acting inside the group itself; from a
+        # manage session the target may not even be a member of this chat.
+        auto_kick = blacklist_policy["kick_on_add"] and group_id in (
+            group_set["group_ids"] if group_set else []
+        )
         lines: list[str] = []
         for user_id in parsed.targets:
             nickname = await self._resolve_member_name(event, group_id, user_id)
@@ -1546,7 +1691,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 后续参数，形如「@某人」。允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event, manage_ok=True):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1564,6 +1709,12 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
+        group_set, error = self._select_group_set(event)
+        if error:
+            async for item in self._reply(event, error):
+                yield item
+            return
+
         parsed = parse_target_args(
             str(args or "").split(),
             extract_at_targets(event),
@@ -1573,7 +1724,7 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        scope = self._scope(group_id)
+        scope = self._scope(group_id, group_set)
         lines: list[str] = []
         for user_id in parsed.targets:
             name = await self._resolve_member_name(event, group_id, user_id)
@@ -1615,13 +1766,15 @@ class QQAdminPlugin(Star):
     async def blacklist_list(
         self,
         event: AstrMessageEvent,
+        args: GreedyStr,
     ) -> AsyncGenerator[Any, None]:
-        """查看本群组共享的黑名单。
+        """查看群组共享的黑名单。
 
         Args:
             event: 消息事件。
+            args: 可选的群号或群组名；在管理会话里对应多个群组时必须填写。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event, manage_ok=True):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1639,12 +1792,25 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        if not self._policy(group_id)["blacklist"]["enabled"]:
+        group_set, error = self._select_group_set(event, str(args or ""))
+        if error:
+            async for item in self._reply(event, error):
+                yield item
+            return
+        if group_set is None:
+            async for item in self._reply(
+                event,
+                self._text("group_not_found", selector=group_id),
+            ):
+                yield item
+            return
+
+        if not self._policy(group_id, group_set)["blacklist"]["enabled"]:
             async for item in self._reply(event, self._text("blacklist_disabled")):
                 yield item
             return
 
-        scope = self._scope(group_id)
+        scope = self._scope(group_id, group_set)
         entries = self.blacklist.list_entries(scope)
         if not entries:
             async for item in self._reply(
@@ -1654,12 +1820,11 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        group_set = find_group_set(self.group_sets, group_id)
         header = self._text(
             "blacklist_header",
             scope=scope,
             count=len(entries),
-            groups=len(group_set["group_ids"]) if group_set else 1,
+            groups=len(group_set["group_ids"]) or 1,
         )
         lines = [header]
         for index, entry in enumerate(entries, start=1):
@@ -1679,29 +1844,40 @@ class QQAdminPlugin(Star):
     #  Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _scope(self, group_id: str) -> str:
+    def _scope(self, group_id: str, group_set: dict[str, Any] | None = None) -> str:
         """Resolve the blacklist bucket for a group.
 
         Args:
             group_id: QQ group id.
+            group_set: Owning group set when it is already known, which is the
+                case for commands run from a manage session.
 
         Returns:
             The shared bucket key when the group belongs to a set, otherwise a
             bucket private to the group.
         """
+        if group_set is not None:
+            return str(group_set["name"])
         return resolve_blacklist_scope(self.group_sets, group_id)
 
-    def _policy(self, group_id: str) -> dict[str, Any]:
-        """Resolve the behaviour settings of a group.
+    def _policy(
+        self,
+        group_id: str,
+        group_set: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve the behaviour settings that apply to a group.
 
         Args:
             group_id: QQ group id.
+            group_set: Owning group set when it is already known.
 
         Returns:
             A mapping with ``default_ban_duration`` and ``blacklist``. Built-in
             defaults are only returned as a safety net; handlers already skip
             groups that belong to no group set.
         """
+        if group_set is not None:
+            return group_set
         return group_settings(self.group_sets, group_id)
 
     def _review_policy(self, target_group_id: str) -> dict[str, Any] | None:
@@ -2041,6 +2217,28 @@ class QQAdminPlugin(Star):
             )
         return result.ok
 
+    def _visible_pending(self, event: AstrMessageEvent) -> list[Any]:
+        """List the pending join requests that a session may act on.
+
+        A manage session only controls the groups of the sets that declared it,
+        so requests of other sets are hidden — their own manage session stays
+        responsible for them.
+
+        Args:
+            event: Event of the ``/审核`` command.
+
+        Returns:
+            Pending requests, oldest first.
+        """
+        pending = self.pending_reviews.load_all()
+        bound = self._manage_sets(event)
+        if not bound:
+            return pending
+        visible_groups = {
+            group_id for group_set in bound for group_id in group_set["group_ids"]
+        }
+        return [item for item in pending if item.group_id in visible_groups]
+
     async def _notify_review(
         self,
         event: AstrMessageEvent,
@@ -2048,7 +2246,7 @@ class QQAdminPlugin(Star):
         request: Any,
         decision: Any,
     ) -> None:
-        """Send the review notification to the manage session.
+        """Send the review notification to the configured destinations.
 
         Args:
             event: Event providing the platform instance id.
@@ -2059,11 +2257,18 @@ class QQAdminPlugin(Star):
         if not group_set.get("notice_enabled", True):
             return
 
-        action_label = {
-            "approve": "已自动放行",
-            "reject": "已自动拒绝",
-            "hold": "待人工确认",
-        }.get(decision.action, decision.action)
+        # A manual decision reuses the same actions, so it needs its own label
+        # instead of reporting the bot as having decided on its own.
+        if decision.reason == "manual" and decision.action in ("approve", "reject"):
+            action_label = (
+                "已人工放行" if decision.action == "approve" else "已人工拒绝"
+            )
+        else:
+            action_label = {
+                "approve": "已自动放行",
+                "reject": "已自动拒绝",
+                "hold": "待人工确认",
+            }.get(decision.action, decision.action)
 
         # The template is keyed on the request content; the decision is
         # appended so an operator sees what the bot already did.
@@ -2078,8 +2283,29 @@ class QQAdminPlugin(Star):
             decision=action_label,
             reason=decision.detail or decision.reason,
         )
-        target = self.notifier.resolve_target(event, group_set)
-        await self.notifier.send_to_session(target, text)
+        if decision.action == "hold":
+            pending = self.pending_reviews.load_all()
+            index = next(
+                (
+                    position
+                    for position, item in enumerate(pending, start=1)
+                    if item.flag == request.flag
+                ),
+                0,
+            )
+            if index:
+                text = (
+                    f"{text}\n"
+                    f"{render_template(self.templates, 'review_pending_hint', index=index)}"
+                )
+
+        targets = self.notifier.targets(
+            NOTIFY_CATEGORY_REVIEW,
+            origin=str(event.unified_msg_origin or ""),
+            manage_session=str(group_set.get("manage_session") or ""),
+        )
+        for target in targets:
+            await self.notifier.send_to_session(target, text)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("审核", alias={"review"})
@@ -2095,7 +2321,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 子命令与编号。允许省略。
         """
-        if self._should_skip(event, require_configured=False):
+        if await self._should_skip(event, require_configured=False):
             return
         operator = await self._permission_context(event)
 
@@ -2113,7 +2339,7 @@ class QQAdminPlugin(Star):
             return
 
         tokens = str(args or "").split()
-        pending = self.pending_reviews.load_all()
+        pending = self._visible_pending(event)
 
         if not tokens or tokens[0] in ("列表", "list"):
             if not pending:
@@ -2166,7 +2392,7 @@ class QQAdminPlugin(Star):
                 "review_decided",
                 user_id=request.user_id,
                 group_id=request.group_id,
-                action="已同意" if action == "approve" else "已拒绝",
+                action="同意" if action == "approve" else "拒绝",
             )
             async for item in self._reply(
                 event,
@@ -2319,7 +2545,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             page: 页码，从 1 开始。允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -2379,7 +2605,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 「成员」或「黑名单」。允许省略。
         """
-        if self._should_skip(event):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
