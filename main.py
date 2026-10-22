@@ -134,37 +134,11 @@ class QQAdminPlugin(Star):
         # Trim the audit log once at startup rather than on every write.
         self.audit.trim()
         self.exporter.cleanup()
-        self._warn_unrouted_reviews()
 
         logger.info(
             f"[QQAdmin] 已加载 | 群组 {len(self.group_sets)} 个 | "
             f"索引 {len(self.group_index)} 个群",
         )
-
-    def _warn_unrouted_reviews(self) -> None:
-        """Warn when requests would wait for an operator nobody notifies.
-
-        A group set whose review falls back to ``hold`` depends on the review
-        notification being delivered somewhere; with the category unrouted the
-        request would sit in the queue invisibly.
-        """
-        if self.notifier.wants(NOTIFY_CATEGORY_REVIEW_NOTICE, "current"):
-            return
-        if self.notifier.wants(NOTIFY_CATEGORY_REVIEW_NOTICE, "manage"):
-            return
-        held = [
-            str(group_set["name"])
-            for group_set in self.group_sets
-            if group_set["join_review"]["policy"]["enabled"]
-            and group_set["join_review"]["policy"]["default_action"] == "hold"
-        ]
-        if held:
-            logger.warning(
-                "[QQAdmin] 群组 "
-                f"{'、'.join(held)} 的进群审核默认行为是转人工确认，"
-                "但「通知与回执」没有勾选「进群审核通知」，申请将无人知晓。"
-                "请在通知设置里勾选该内容，或把默认行为改为自动放行/自动拒绝",
-            )
 
     @filter.on_platform_loaded()
     async def restore_whole_ban_timers(self) -> None:
@@ -1494,13 +1468,13 @@ class QQAdminPlugin(Star):
             review: Normalized join review policy.
 
         Returns:
-            ``转人工确认``, ``自动放行`` or ``自动拒绝``.
+            ``保持待审``, ``自动放行`` or ``自动拒绝``.
         """
         return {
-            "hold": "转人工确认",
+            "hold": "保持待审",
             "approve": "自动放行",
             "reject": "自动拒绝",
-        }.get(str(review.get("default_action") or "hold"), "转人工确认")
+        }.get(str(review.get("default_action") or "hold"), "保持待审")
 
     def _notify_route_lines(self, set_name: str, indent: str = "  ") -> list[str]:
         """Describe where each notification category of a group set goes.

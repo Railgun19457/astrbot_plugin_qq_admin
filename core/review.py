@@ -209,7 +209,7 @@ def evaluate(
     if default_action not in REVIEW_DEFAULT_ACTIONS:
         default_action = "hold"
     if default_action == "hold":
-        return ReviewDecision("hold", "manual", "未命中规则，转人工确认")
+        return ReviewDecision("hold", "manual", "未命中规则，保持待审")
 
     return ReviewDecision(
         default_action,
