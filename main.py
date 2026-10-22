@@ -35,7 +35,6 @@ from .core.config import (
     NOTIFY_CATEGORY_EXPORT,
     NOTIFY_CATEGORY_KICK,
     NOTIFY_CATEGORY_RECALL,
-    NOTIFY_CATEGORY_REVIEW_ACTION,
     NOTIFY_CATEGORY_REVIEW_NOTICE,
     build_group_index,
     find_group_set,
@@ -2318,7 +2317,7 @@ class QQAdminPlugin(Star):
                 event,
                 self._text("api_failed", error="协议端拒绝了该操作"),
                 receipt=True,
-                category=NOTIFY_CATEGORY_REVIEW_ACTION,
+                category=NOTIFY_CATEGORY_REVIEW_NOTICE,
                 group_id=request.group_id,
             ):
                 await event.send(item)
@@ -2334,7 +2333,7 @@ class QQAdminPlugin(Star):
                 action="同意" if action == "approve" else "拒绝",
             ),
             receipt=True,
-            category=NOTIFY_CATEGORY_REVIEW_ACTION,
+            category=NOTIFY_CATEGORY_REVIEW_NOTICE,
             group_id=request.group_id,
         ):
             await event.send(item)
