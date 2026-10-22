@@ -26,7 +26,7 @@
   "group_sets": {
     "type": "template_list",
     "description": "群组定义",
-    "hint": "插件只对这里配置的群生效",
+    "hint": "插件只对这里配置的群生效；未列入的群不会响应任何指令、自动审核与黑名单拦截",
     "templates": {
       "group_set": {
         "name": "群组",
@@ -35,7 +35,7 @@
           "name": {
             "type": "string",
             "description": "群组名称",
-            "hint": "仅用于显示",
+            "hint": "仅用于显示与黑名单分组：同名群组共享同一份黑名单，留空自动命名",
             "default": ""
           },
           "group_ids": {
@@ -44,19 +44,19 @@
               "type": "string"
             },
             "description": "群号列表",
-            "hint": "同一群号不要重复出现在多个群组里",
+            "hint": "同一群号不要出现在多个群组里；出现冲突时以先配置的群组为准",
             "default": []
           },
           "manage_session": {
             "type": "string",
             "description": "管理会话",
-            "hint": "群管理员专用的会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456。审核通知默认发到这里，其中的「黑名单 / 拉黑 / 解除拉黑 / 群管状态」对该群组生效，发送「黑名单 通知设置」可查看通知路由；留空则通知发到申请所在群，且只能在各群内管理",
+            "hint": "群管理员专用的控制台会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456。审核通知默认发到这里，其中的「黑名单 / 拉黑 / 解除拉黑 / 群管状态」对该群组生效，发送「黑名单 通知设置」可查看通知路由；留空则回退为在各群内管理",
             "default": ""
           },
           "default_ban_duration": {
             "type": "string",
             "description": "默认禁言时长",
-            "hint": "支持 600（秒）、10m、2h、1d 等写法",
+            "hint": "未指定时长时使用；支持 600（秒）、10m、2h、1d 等写法",
             "default": "10m"
           },
           "blacklist": {
@@ -87,7 +87,8 @@
                 "hint": "拉黑成功后把目标移出当前群（需踢人权限）；只作用于执行拉黑的群",
                 "default": false
               }
-            }
+            },
+            "hint": "组内所有群共享同一份黑名单"
           },
           "join_review": {
             "type": "object",
@@ -97,7 +98,8 @@
               "enabled": {
                 "type": "bool",
                 "description": "启用进群审核",
-                "default": false
+                "default": false,
+                "hint": "开启后按下面的规则自动处理新申请；关闭则完全不自动处理"
               },
               "blacklist_reject": {
                 "type": "bool",
@@ -108,7 +110,8 @@
               "keyword_allow": {
                 "type": "bool",
                 "description": "答案匹配关键词时自动放行",
-                "default": true
+                "default": true,
+                "hint": "关闭后命中关键词也不会自动放行"
               },
               "keywords": {
                 "type": "list",
@@ -139,7 +142,7 @@
               "default_action": {
                 "type": "string",
                 "description": "默认行为",
-                "hint": "未命中黑名单、跨群免审核与关键词时的处理方式：hold=保持待审（安静地记入待办，不会主动提示；只有「通知与回执」勾选了「进群审核通知」才发送人工审核消息），approve=直接放行，reject=直接拒绝",
+                "hint": "未命中黑名单、跨群免审核与关键词时：hold=保持待审（安静进入待办，需要有人在别处引用通知才能处理），approve=直接放行，reject=直接拒绝；发不发通知由「通知与回执」的「进群审核通知发送到」决定",
                 "options": [
                   "hold",
                   "approve",
@@ -151,7 +154,8 @@
               "reject_reason": {
                 "type": "string",
                 "description": "拒绝理由",
-                "default": "未通过进群审核"
+                "default": "未通过进群审核",
+                "hint": "拒绝申请时展示给申请人；留空使用默认文案"
               },
               "exemptions": {
                 "type": "list",
@@ -250,7 +254,7 @@
           },
           "notice": {
             "name": "群公告",
-            "description": "发送与查看群公告",
+            "description": "向群内发送公告（仅 LLM 工具）",
             "type": "string",
             "default": "group_admin",
             "options": [
@@ -283,7 +287,7 @@
           },
           "review": {
             "name": "进群审核",
-            "description": "查看与处理待审核的进群申请",
+            "description": "处理待审核的进群申请（引用通知回复同意/拒绝）",
             "type": "string",
             "default": "group_admin",
             "options": [
@@ -303,9 +307,11 @@
               "astrbot_admin"
             ]
           }
-        }
+        },
+        "hint": "any=任何人，group_admin=群主或群管理员，astrbot_admin=仅 AstrBot 管理员与白名单用户"
       }
-    }
+    },
+    "hint": "指令默认允许 AstrBot 管理员、白名单用户与群主/群管理员使用，查询类指令默认也允许普通成员"
   },
   "confirm": {
     "type": "object",
@@ -314,7 +320,8 @@
       "enabled": {
         "type": "bool",
         "description": "启用二次确认",
-        "default": true
+        "default": true,
+        "hint": "关闭后踢人与全群禁言不再询问，直接执行"
       },
       "timeout": {
         "type": "int",
@@ -345,7 +352,8 @@
           "同意",
           "确认",
           "yes"
-        ]
+        ],
+        "hint": "进群审核通知的「同意」回复也用这里"
       },
       "cancel_words": {
         "type": "list",
@@ -361,7 +369,8 @@
           "no"
         ]
       }
-    }
+    },
+    "hint": "踢人与全群禁言默认需要发起人二次确认；确认词与取消词同时用于进群审核通知的回复"
   },
   "export": {
     "type": "object",
@@ -385,17 +394,18 @@
         "hint": "启动时清理，0 表示不清理",
         "default": 24
       }
-    }
+    },
+    "hint": "导出结果生成 xlsx，可上传到群文件；本地文件按保存时长自动清理"
   },
   "notify": {
     "type": "object",
     "description": "通知与回执",
-    "hint": "指令回执（谁执行的指令就在哪个会话答复）默认只在执行会话显示，可勾选额外转发到管理会话；进群审核通知由申请人触发，需要单独选择发到哪里",
+    "hint": "两类通知的触发方式不同：指令回执永远在执行指令的会话答复，可在下面勾选额外转发到管理会话；进群审核通知由申请人触发，需要单独选择发到哪里",
     "items": {
       "receipt_to_manage_session": {
         "type": "list",
         "description": "回执额外发到管理会话",
-        "hint": "勾选的内容在答复执行会话的同时，再发一份到群组配置的管理会话（从管理会话执行的指令不会重复发）。各项含义：禁言=禁言/解禁/全群禁言回执；踢人=/踢 回执；撤回=/撤回 回执；黑名单=/拉黑、/解除拉黑 回执与拉黑后自动踢出结果；群导出=/群导出 回执",
+        "hint": "勾选的内容在答复执行会话的同时，再转发一份到该群组的管理会话（在管理会话里执行的指令不会重复发）。禁言=含解禁与全群禁言；踢人=/踢；撤回=/撤回；黑名单=/拉黑、/解除拉黑及拉黑后自动踢出；群导出=/群导出",
         "options": [
           "禁言",
           "踢人",
@@ -408,7 +418,7 @@
       "review_notice_target": {
         "type": "string",
         "description": "进群审核通知发送到",
-        "hint": "新进群申请及其处理结果：origin=只发申请所在的群；manage=只发管理会话（未配置时改发申请所在群）；both=两者都发；none=不发送（申请安静地进入待办队列，需要有人在别处引用通知才能处理）。引用通知回复同意/拒绝后的结果跟随这里的选择",
+        "hint": "新进群申请、自动放行/拒绝、保持待审提示，以及引用通知处理后的回执都发到：origin=申请所在的群；manage=管理会话（未配置时改发申请所在群，默认）；both=两者都发；none=不发，申请安静地进入待办队列",
         "options": [
           "origin",
           "manage",
@@ -436,12 +446,13 @@
         "hint": "启动时清理，0 表示不清理",
         "default": 30
       }
-    }
+    },
+    "hint": "记录谁在哪个群执行了什么，写入插件数据目录的 audit.jsonl"
   },
   "templates": {
     "type": "object",
     "description": "消息模板",
-    "hint": "占位符用花括号，例如 {target_name}。渲染失败会自动回退到默认文案",
+    "hint": "占位符用花括号，例如 {target_name}；渲染失败会自动回退到默认文案",
     "items": {
       "ban_success": {
         "type": "text",
@@ -525,7 +536,7 @@
       "blacklist_disabled": {
         "type": "text",
         "description": "黑名单功能已关闭",
-        "hint": "群组关闭黑名单后，拉黑指令与工具返回的提示",
+        "hint": "群组关闭黑名单后，拉黑与解除拉黑返回的提示",
         "default": "黑名单功能已在插件配置中关闭"
       },
       "blacklist_header": {
@@ -574,7 +585,7 @@
       "review_new_request": {
         "type": "text",
         "description": "进群申请通知",
-        "hint": "可用占位符：{group_id} {user_id} {comment} {sub_type} {decision} {reason}",
+        "hint": "可用占位符：{group_id} {user_id} {user_name} {comment} {sub_type} {decision} {reason}",
         "default": "【进群申请】群 {group_id}\n申请人：{user_id}\n答案：{comment}\n处理：{decision}（{reason}）"
       },
       "review_decided": {
@@ -585,14 +596,15 @@
       },
       "review_pending_hint": {
         "type": "text",
-        "description": "待人工确认提示",
-        "hint": "提示用户引用通知消息回复同意/拒绝",
+        "description": "待审通知的回复提示",
+        "hint": "贴在「保持待审」的通知末尾，提示引用该消息回复",
         "default": "引用本条消息回复「同意」或「拒绝」即可处理"
       },
       "manage_unsupported": {
         "type": "text",
         "description": "管理会话不支持该指令",
-        "default": "该指令需要在目标群内执行。管理会话仅支持：审核、黑名单、拉黑、解除拉黑、群管状态"
+        "default": "该指令需要在目标群内执行。管理会话仅支持：黑名单、拉黑、解除拉黑、群管状态",
+        "hint": "在管理会话里执行不支持的指令时回复"
       },
       "manage_ambiguous": {
         "type": "text",
@@ -609,13 +621,14 @@
       "notification_settings": {
         "type": "text",
         "description": "通知设置提示",
-        "hint": "提醒在管理会话里可以查看某个群组的通知路由",
+        "hint": "群内 /群管状态 末尾的提示",
         "default": "在管理会话发送「黑名单 通知设置 [群号或群组名]」可查看该群组的通知路由"
       },
       "member_list_failed": {
         "type": "text",
         "description": "获取群成员失败",
-        "default": "无法获取群成员列表，请稍后重试"
+        "default": "无法获取群成员列表，请稍后重试",
+        "hint": "导出群成员但取不到成员列表时回复"
       },
       "export_success": {
         "type": "text",
