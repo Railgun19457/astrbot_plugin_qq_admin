@@ -82,10 +82,12 @@ GROUP_PRIVILEGED_ROLES: frozenset[str] = frozenset({"owner", "admin"})
 #: Special argument meaning "everyone in this group".
 ALL_TARGET_KEYWORD = "全体"
 
-#: Message categories whose delivery route can be configured per session.
-#: One category per management function, so an operator can keep, for example,
-#: ban receipts in the group while sending join review notices to the manage
-#: session only.
+#: Message categories whose delivery route can be configured.
+#:
+#: Command receipts answer an operator, so they are always shown in the session
+#: the command was issued in and can additionally be mirrored into the manage
+#: session. The join review notice is triggered by an applicant, so it needs an
+#: explicit destination instead.
 NOTIFY_CATEGORY_BAN = "禁言"
 NOTIFY_CATEGORY_KICK = "踢人"
 NOTIFY_CATEGORY_RECALL = "撤回"
@@ -93,15 +95,26 @@ NOTIFY_CATEGORY_BLACKLIST = "黑名单"
 NOTIFY_CATEGORY_EXPORT = "群导出"
 NOTIFY_CATEGORY_REVIEW_NOTICE = "进群审核通知"
 
-#: Every routable category, in the order the WebUI offers them.
-NOTIFY_CATEGORIES: tuple[str, ...] = (
+#: Categories described as receipts: they are answered in the issuing session.
+NOTIFY_RECEIPT_CATEGORIES: tuple[str, ...] = (
     NOTIFY_CATEGORY_BAN,
     NOTIFY_CATEGORY_KICK,
     NOTIFY_CATEGORY_RECALL,
     NOTIFY_CATEGORY_BLACKLIST,
     NOTIFY_CATEGORY_EXPORT,
+)
+
+#: Every routable category, in the order the WebUI offers them.
+NOTIFY_CATEGORIES: tuple[str, ...] = (
+    *NOTIFY_RECEIPT_CATEGORIES,
     NOTIFY_CATEGORY_REVIEW_NOTICE,
 )
+
+#: Destinations of the join review notice.
+NOTIFY_REVIEW_TARGETS: tuple[str, ...] = ("origin", "manage", "both", "none")
+
+#: Default destination of the join review notice.
+DEFAULT_REVIEW_NOTICE_TARGET: str = "manage"
 
 _TIME_RE = re.compile(r"^(\d+)\s*([smhd])?$", re.IGNORECASE)
 
@@ -701,34 +714,35 @@ def resolve_blacklist_scope(
     return blacklist_scope(group_id)
 
 
-def normalize_notify_routes(raw: Any) -> dict[str, list[str]]:
-    """Normalize the ``notify`` configuration into per-session category lists.
+def normalize_notify_routes(raw: Any) -> dict[str, Any]:
+    """Normalize the ``notify`` configuration.
 
-    Every routable message category (see :data:`NOTIFY_CATEGORIES`) can be
-    delivered to the session the action happened in, to the manage session, to
-    both or to neither. Unknown categories are dropped so a stale config cannot
-    resurrect a removed one.
+    Command receipts always answer the session a command was issued in, so they
+    are configured as a list of categories to *also* mirror into the manage
+    session. The join review notice is triggered by an applicant instead of a
+    command, so its destination is chosen directly.
 
     Args:
         raw: Raw ``notify`` mapping from the plugin configuration.
 
     Returns:
-        A dict with the keys ``current`` and ``manage``, each holding the
-        categories delivered to that session.
+        A dict with ``mirror`` (receipt categories to mirror) and
+        ``review_target`` (one of ``config.NOTIFY_REVIEW_TARGETS``). Unknown
+        entries are dropped so a stale config cannot resurrect a removed one.
     """
     source = raw if isinstance(raw, dict) else {}
-    return {
-        "current": [
-            str(item)
-            for item in normalize_id_list(source.get("to_current_session"))
-            if item in NOTIFY_CATEGORIES
-        ],
-        "manage": [
-            str(item)
-            for item in normalize_id_list(source.get("to_manage_session"))
-            if item in NOTIFY_CATEGORIES
-        ],
-    }
+
+    mirror = [
+        str(item)
+        for item in normalize_id_list(source.get("receipt_to_manage_session"))
+        if item in NOTIFY_RECEIPT_CATEGORIES
+    ]
+
+    review_target = str(source.get("review_notice_target") or "").strip().lower()
+    if review_target not in NOTIFY_REVIEW_TARGETS:
+        review_target = DEFAULT_REVIEW_NOTICE_TARGET
+
+    return {"mirror": mirror, "review_target": review_target}
 
 
 # ------------------------------------------------------------------ #

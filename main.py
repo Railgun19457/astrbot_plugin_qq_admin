@@ -29,13 +29,13 @@ from .core.config import (
     CAPABILITY_KEYS,
     DEFAULT_REVIEW_REJECT_REASON,
     MAX_BAN_DURATION,
-    NOTIFY_CATEGORIES,
     NOTIFY_CATEGORY_BAN,
     NOTIFY_CATEGORY_BLACKLIST,
     NOTIFY_CATEGORY_EXPORT,
     NOTIFY_CATEGORY_KICK,
     NOTIFY_CATEGORY_RECALL,
     NOTIFY_CATEGORY_REVIEW_NOTICE,
+    NOTIFY_RECEIPT_CATEGORIES,
     build_group_index,
     find_group_set,
     find_group_set_by_name,
@@ -344,8 +344,8 @@ class QQAdminPlugin(Star):
         )
         self.notifier = Notifier(
             self.context,
-            to_current=self.notify_routes["current"],
-            to_manage=self.notify_routes["manage"],
+            mirror=self.notify_routes["mirror"],
+            review_target=self.notify_routes["review_target"],
         )
         self._register_tools()
         self._build_confirm_manager()
@@ -570,9 +570,9 @@ class QQAdminPlugin(Star):
             stop: Whether to stop event propagation afterwards. A stopped event
                 also keeps the message away from the default LLM request.
             receipt: Mark ``text`` as the outcome of an executed management
-                action. Receipts are routed by the ``notify`` configuration, so
-                they may be withheld from the current session, mirrored into the
-                manage session, or both.
+                action. Receipts always answer the session they were issued in
+                and are additionally mirrored into the manage session when the
+                configuration asks for it.
             group_id: Group the action happened in; selects the group set whose
                 manage session receives the mirrored receipt. Defaults to the
                 event's group.
@@ -583,25 +583,25 @@ class QQAdminPlugin(Star):
             The message result for the pipeline to deliver.
         """
         origin = str(event.unified_msg_origin or "")
-        mirror: list[str] = []
-        if text and receipt:
+        mirror = ""
+        if text and receipt and self.notifier.mirrors(category or NOTIFY_CATEGORY_BAN):
             group_set = find_group_set(
                 self.group_sets,
                 group_id or str(event.get_group_id() or ""),
             )
-            targets = self.notifier.targets(
-                category or NOTIFY_CATEGORY_BAN,
-                origin=origin,
-                manage_session=str((group_set or {}).get("manage_session", "")),
+            target = self.notifier.manage_target(
+                str((group_set or {}).get("manage_session") or ""),
             )
-            if origin in targets:
-                yield event.plain_result(text)
-            mirror = [target for target in targets if target != origin]
-        elif text:
+            # Mirroring into the very session that already saw the receipt
+            # would duplicate it.
+            if target and target != origin:
+                mirror = target
+
+        if text:
             yield event.plain_result(text)
 
-        for target in mirror:
-            await self.notifier.send_to_session(target, text)
+        if mirror:
+            await self.notifier.send_to_session(mirror, text)
 
         if stop:
             event.stop_event()
@@ -1476,35 +1476,42 @@ class QQAdminPlugin(Star):
         }.get(str(review.get("default_action") or "hold"), "保持待审")
 
     def _notify_route_lines(self, set_name: str, indent: str = "  ") -> list[str]:
-        """Describe where each notification category of a group set goes.
+        """Describe where the notifications of a group set go.
+
+        Command receipts are answered where the command was issued, so only
+        their mirroring is configurable. The join review notice is triggered by
+        an applicant and picks its destination explicitly.
 
         Args:
             set_name: Name of the group set.
             indent: Leading whitespace of every line.
 
         Returns:
-            One line per category, plus a line listing the disabled categories.
+            One line per receipt category plus one for the review notice.
         """
         group_set = find_group_set_by_name(self.group_sets, set_name)
         manage = str((group_set or {}).get("manage_session") or "")
         manage_ready = bool(parse_manage_session(manage))
 
-        lines = [f"{indent}通知路由："]
-        silent: list[str] = []
-        for category in NOTIFY_CATEGORIES:
-            targets: list[str] = []
-            if self.notifier.wants(category, "current"):
-                targets.append("当前会话")
-            if self.notifier.wants(category, "manage"):
-                targets.append(
-                    "管理会话" if manage_ready else "管理会话未配置（回退当前会话）"
-                )
-            if not targets:
-                silent.append(category)
-                continue
-            lines.append(f"{indent}  {category} → {'、'.join(targets)}")
-        if silent:
-            lines.append(f"{indent}  不发送：{'、'.join(silent)}")
+        lines = [f"{indent}指令回执：在执行会话展示"]
+        mirrored = [
+            category
+            for category in NOTIFY_RECEIPT_CATEGORIES
+            if self.notifier.mirrors(category)
+        ]
+        if mirrored:
+            suffix = (
+                "另外发到管理会话"
+                if manage_ready
+                else "另外发到管理会话（未配置，等同执行会话）"
+            )
+            lines.append(f"{indent}  {suffix}：{'、'.join(mirrored)}")
+        else:
+            lines.append(f"{indent}  不额外发到管理会话")
+        lines.append(
+            f"{indent}进群审核通知 → "
+            f"{self.notifier.describe_review_target(self.notifier.review_target, manage_ready=manage_ready)}",
+        )
         return lines
 
     # ------------------------------------------------------------------ #
@@ -2436,8 +2443,7 @@ class QQAdminPlugin(Star):
         if decision.action == "hold":
             text = f"{text}\n{render_template(self.templates, 'review_pending_hint')}"
 
-        targets = self.notifier.targets(
-            NOTIFY_CATEGORY_REVIEW_NOTICE,
+        targets = self.notifier.review_destinations(
             origin=str(event.unified_msg_origin or ""),
             manage_session=str(group_set.get("manage_session") or ""),
         )

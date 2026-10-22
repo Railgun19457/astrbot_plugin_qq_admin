@@ -1,8 +1,15 @@
 """Notification routing and receipt delivery.
 
-Each routable message category (operation receipts, join review notices) can be
-delivered to the session the action happened in, to the *manage session* of the
-owning group set, to both, or to neither.
+Two kinds of messages are routed differently, because they are triggered
+differently:
+
+* **Command receipts** answer an operator, so they always stay in the session
+  the command was issued in. Each of them can additionally be mirrored into the
+  manage session of the owning group set, which lets the manage session double
+  as a control room that sees every action without the group being spammed.
+* **The join review notice** is triggered by an applicant rather than by a
+  command, so it has no session to answer: its destination is configured
+  directly (application group, manage session, both, or nowhere).
 
 A manage session is declared per group set and holds a ``unified_msg_origin``
 (UMO) such as ``aiocqhttp:GroupMessage:123456``, which can be copied from the
@@ -46,90 +53,116 @@ def parse_manage_session(raw: str) -> str | None:
 
 
 class Notifier:
-    """Resolves where a notification category is delivered.
+    """Resolves where a notification is delivered.
 
     Attributes:
         _context: AstrBot context used for outbound messages.
-        _to_current: Categories delivered to the session of the event.
-        _to_manage: Categories delivered to the manage session.
+        _mirror: Receipt categories also sent to the manage session.
+        _review_target: Destination of the join review notice.
     """
 
     def __init__(
         self,
         context: Context,
         *,
-        to_current: list[str],
-        to_manage: list[str],
+        mirror: list[str],
+        review_target: str,
     ) -> None:
         """Store the routing policy.
 
         Args:
             context: AstrBot context.
-            to_current: Categories routed to the current session.
-            to_manage: Categories routed to the manage session.
+            mirror: Receipt categories mirrored into the manage session.
+            review_target: Destination of the join review notice.
         """
         self._context = context
-        self._to_current = set(to_current)
-        self._to_manage = set(to_manage)
+        self._mirror = set(mirror)
+        self._review_target = review_target
 
-    def wants(self, category: str, target: str) -> bool:
-        """Report whether a category is routed to a target.
+    @property
+    def review_target(self) -> str:
+        """Destination of the join review notice."""
+        return self._review_target
 
-        Unlike :meth:`targets` this ignores the fallback and the origin, so
-        callers can show the configured routing itself.
+    def mirrors(self, category: str) -> bool:
+        """Report whether a receipt category is mirrored.
 
         Args:
-            category: One of ``config.NOTIFY_CATEGORIES``.
-            target: ``"current"`` or ``"manage"``.
+            category: One of ``config.NOTIFY_RECEIPT_CATEGORIES``.
 
         Returns:
-            ``True`` when the category is selected for that target.
+            ``True`` when the receipt is also sent to the manage session.
         """
-        selected = self._to_current if target == "current" else self._to_manage
-        return category in selected
+        return category in self._mirror
 
-    def targets(
-        self,
-        category: str,
-        *,
-        origin: str,
-        manage_session: str = "",
-    ) -> list[str]:
-        """Resolve the destinations of one notification.
-
-        A category routed to the manage session without a usable manage session
-        configured falls back to the current session, so enabling the route can
-        never make a notification disappear silently.
+    def manage_target(self, manage_session: str) -> str:
+        """Resolve the manage session destination.
 
         Args:
-            category: One of ``config.NOTIFY_CATEGORIES``.
-            origin: ``unified_msg_origin`` of the session the action happened
-                in.
             manage_session: Raw ``manage_session`` value of the owning group
                 set, empty when the group belongs to no set.
 
         Returns:
-            De-duplicated UMOs in delivery order. Empty when the category is
-            enabled on neither target.
+            The manage session UMO, or an empty string when unusable.
+        """
+        return parse_manage_session(manage_session) or ""
+
+    def review_destinations(self, *, origin: str, manage_session: str) -> list[str]:
+        """Resolve the destinations of the join review notice.
+
+        Args:
+            origin: ``unified_msg_origin`` of the application's group.
+            manage_session: Raw ``manage_session`` value of the owning group
+                set.
+
+        Returns:
+            De-duplicated UMOs in delivery order. Empty when the notice is
+            disabled. A configured-but-missing manage session degrades to the
+            application group so the notice is never lost silently.
         """
         origin = str(origin or "")
+        manage = self.manage_target(manage_session)
+
+        if self._review_target == "none":
+            return []
+        if self._review_target == "origin":
+            targets = [origin]
+        elif self._review_target == "both":
+            targets = [origin, manage]
+        else:
+            targets = [manage or origin]
+
         destinations: list[str] = []
-
-        if category in self._to_current and origin:
-            destinations.append(origin)
-
-        if category in self._to_manage:
-            fallback = parse_manage_session(manage_session) or origin
-            if fallback and fallback not in destinations:
-                destinations.append(fallback)
-
+        for target in targets:
+            if target and target not in destinations:
+                destinations.append(target)
         return destinations
+
+    @staticmethod
+    def describe_review_target(target: str, *, manage_ready: bool) -> str:
+        """Render a review destination for display.
+
+        Args:
+            target: One of ``config.NOTIFY_REVIEW_TARGETS``.
+            manage_ready: Whether the group set has a usable manage session.
+
+        Returns:
+            A human readable label such as ``管理会话``.
+        """
+        if target == "none":
+            return "不发送"
+        if target == "origin":
+            return "申请所在群"
+        manage = "管理会话" if manage_ready else "管理会话未配置（等同申请所在群）"
+        if target == "both":
+            return f"申请所在群、{manage}"
+        return "管理会话" if manage_ready else "管理会话未配置（回退申请所在群）"
 
     async def send_to_session(self, target: str, text: str) -> bool:
         """Send a proactive message to a resolved destination.
 
         Args:
-            target: UMO returned by :meth:`targets`.
+            target: UMO returned by :meth:`review_destinations`.
             text: Message body.
 
         Returns:
