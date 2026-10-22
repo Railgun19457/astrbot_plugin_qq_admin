@@ -31,8 +31,8 @@ DEFAULT_REVIEW_REJECT_REASON: str = "未通过进群审核"
 #: Request types a keyword answer may be limited to.
 REVIEW_QUESTION_TYPES: tuple[str, ...] = ("any", "add", "invite")
 
-#: Actions an unattended join request may fall back to.
-UNATTENDED_ACTIONS: tuple[str, ...] = ("hold", "reject", "approve")
+#: Actions taken when no review rule matched the applicant.
+REVIEW_DEFAULT_ACTIONS: tuple[str, ...] = ("hold", "approve", "reject")
 
 #: Built-in join review policy of a group set.
 DEFAULT_REVIEW_POLICY: dict[str, Any] = {
@@ -42,8 +42,7 @@ DEFAULT_REVIEW_POLICY: dict[str, Any] = {
     "keywords": [],
     "question_type": "any",
     "min_account_level": 0,
-    "manual_confirm": True,
-    "unattended_action": "hold",
+    "default_action": "hold",
     "reject_reason": DEFAULT_REVIEW_REJECT_REASON,
 }
 
@@ -238,8 +237,8 @@ def normalize_review_policy(raw: Any) -> dict[str, Any]:
     if question_type not in REVIEW_QUESTION_TYPES:
         question_type = "any"
 
-    unattended = str(source.get("unattended_action") or "hold").strip().lower()
-    if unattended not in UNATTENDED_ACTIONS:
+    unattended = str(source.get("default_action") or "hold").strip().lower()
+    if unattended not in REVIEW_DEFAULT_ACTIONS:
         unattended = "hold"
 
     keyword_allow = bool(source.get("keyword_allow", True))
@@ -258,8 +257,7 @@ def normalize_review_policy(raw: Any) -> dict[str, Any]:
         "keywords_by_group": keywords_by_group,
         "question_type": question_type,
         "min_account_level": min_level,
-        "manual_confirm": bool(source.get("manual_confirm", True)),
-        "unattended_action": unattended,
+        "default_action": unattended,
         "reject_reason": (
             str(source.get("reject_reason") or DEFAULT_REVIEW_REJECT_REASON).strip()
             or DEFAULT_REVIEW_REJECT_REASON

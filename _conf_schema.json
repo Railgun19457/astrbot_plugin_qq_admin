@@ -136,20 +136,14 @@
                 "hint": "0 表示不检查；需协议端支持 level 字段，不支持时跳过并警告",
                 "default": 0
               },
-              "manual_confirm": {
-                "type": "bool",
-                "description": "转人工确认",
-                "hint": "未命中黑名单、免审核或关键词时，转发到管理会话等待人工处理",
-                "default": true
-              },
-              "unattended_action": {
+              "default_action": {
                 "type": "string",
-                "description": "无人值守时的默认行为",
-                "hint": "仅在关闭「转人工确认」时生效：hold=保持待审，reject=直接拒绝，approve=直接放行",
+                "description": "默认行为",
+                "hint": "未命中黑名单、跨群免审核与关键词时的处理方式：hold=转人工确认（引用通知回复同意/拒绝处理），approve=直接放行，reject=直接拒绝。是否发通知由「通知与回执」决定",
                 "options": [
                   "hold",
-                  "reject",
-                  "approve"
+                  "approve",
+                  "reject"
                 ],
                 "default": "hold",
                 "obvious_hint": true

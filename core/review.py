@@ -11,8 +11,8 @@ Decision order for a group join request:
 2. cross-group exemption match -> approve
 3. account level below the configured minimum -> reject
 4. keyword match -> approve
-5. ``manual_confirm`` on -> notify the manage session and wait for an operator
-6. otherwise -> fall back to ``unattended_action``
+5. ``default_action`` -> ``hold`` waits for an operator, ``approve`` and
+   ``reject`` decide immediately
 
 The pending queue is persisted so that a restart does not silently drop
 requests that a human still has to decide on, and so that the opaque ``flag``
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import UNATTENDED_ACTIONS
+from .config import REVIEW_DEFAULT_ACTIONS
 from .store import JsonStore
 
 #: Request sub types that mean "this user wants to join the group".
@@ -160,8 +160,7 @@ def evaluate(
     min_account_level: int,
     keywords: list[str],
     question_type: str,
-    manual_confirm: bool,
-    unattended_action: str,
+    default_action: str,
 ) -> ReviewDecision:
     """Decide what to do with a join request.
 
@@ -176,8 +175,8 @@ def evaluate(
         keywords: Answers that approve the request when matched.
         question_type: ``any``, ``add`` or ``invite``; limits the keyword check
             to one kind of request.
-        manual_confirm: Whether unmatched requests are escalated to a human.
-        unattended_action: Fallback when ``manual_confirm`` is off.
+        default_action: What to do when no rule matched: ``hold`` waits for an
+            operator, ``approve`` and ``reject`` decide immediately.
 
     Returns:
         The decision to apply.
@@ -207,15 +206,15 @@ def evaluate(
                 "approve", "keyword", f"命中关键词：{'、'.join(keywords)}"
             )
 
-    if manual_confirm:
+    if default_action not in REVIEW_DEFAULT_ACTIONS:
+        default_action = "hold"
+    if default_action == "hold":
         return ReviewDecision("hold", "manual", "未命中规则，转人工确认")
 
-    if unattended_action not in UNATTENDED_ACTIONS:
-        unattended_action = "hold"
     return ReviewDecision(
-        unattended_action,
-        "unattended",
-        f"无人值守策略：{unattended_action}",
+        default_action,
+        "default",
+        f"默认行为：{'放行' if default_action == 'approve' else '拒绝'}",
     )
 
 

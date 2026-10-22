@@ -134,11 +134,37 @@ class QQAdminPlugin(Star):
         # Trim the audit log once at startup rather than on every write.
         self.audit.trim()
         self.exporter.cleanup()
+        self._warn_unrouted_reviews()
 
         logger.info(
             f"[QQAdmin] 已加载 | 群组 {len(self.group_sets)} 个 | "
             f"索引 {len(self.group_index)} 个群",
         )
+
+    def _warn_unrouted_reviews(self) -> None:
+        """Warn when requests would wait for an operator nobody notifies.
+
+        A group set whose review falls back to ``hold`` depends on the review
+        notification being delivered somewhere; with the category unrouted the
+        request would sit in the queue invisibly.
+        """
+        if self.notifier.wants(NOTIFY_CATEGORY_REVIEW_NOTICE, "current"):
+            return
+        if self.notifier.wants(NOTIFY_CATEGORY_REVIEW_NOTICE, "manage"):
+            return
+        held = [
+            str(group_set["name"])
+            for group_set in self.group_sets
+            if group_set["join_review"]["policy"]["enabled"]
+            and group_set["join_review"]["policy"]["default_action"] == "hold"
+        ]
+        if held:
+            logger.warning(
+                "[QQAdmin] 群组 "
+                f"{'、'.join(held)} 的进群审核默认行为是转人工确认，"
+                "但「通知与回执」没有勾选「进群审核通知」，申请将无人知晓。"
+                "请在通知设置里勾选该内容，或把默认行为改为自动放行/自动拒绝",
+            )
 
     @filter.on_platform_loaded()
     async def restore_whole_ban_timers(self) -> None:
@@ -1408,6 +1434,8 @@ class QQAdminPlugin(Star):
             review_line = "  进群审核：未配置（本群未加入任何群组）"
         else:
             review_line = f"  进群审核：{'已开启' if review['enabled'] else '已关闭'}"
+            if review["enabled"]:
+                review_line += f" | 默认行为：{self._default_action_label(review)}"
             sources = self._review_exempt_sources(group_id)
             if sources and review["enabled"]:
                 review_line += f" | 跨群免审核：{len(sources)} 个来源群"
@@ -1453,11 +1481,26 @@ class QQAdminPlugin(Star):
                 f"  群组「{group_set['name']}」："
                 f"群 {', '.join(group_set['group_ids']) or '（未填写群号）'}"
                 f" | 黑名单 {self.blacklist.count(str(group_set['name']))} 条"
-                f" | 进群审核 {'已开启' if review['enabled'] else '已关闭'}",
+                f" | 进群审核 {'已开启（默认行为：' + self._default_action_label(review) + '）' if review['enabled'] else '已关闭'}",
             )
             lines.extend(self._notify_route_lines(group_set["name"], "    "))
-        lines.append("  可用指令：审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态")
+        lines.append("  可用指令：黑名单 / 拉黑 / 解除拉黑 / 群管状态")
         return "\n".join(lines)
+
+    def _default_action_label(self, review: dict[str, Any]) -> str:
+        """Describe the fallback behaviour of a join review policy.
+
+        Args:
+            review: Normalized join review policy.
+
+        Returns:
+            ``转人工确认``, ``自动放行`` or ``自动拒绝``.
+        """
+        return {
+            "hold": "转人工确认",
+            "approve": "自动放行",
+            "reject": "自动拒绝",
+        }.get(str(review.get("default_action") or "hold"), "转人工确认")
 
     def _notify_route_lines(self, set_name: str, indent: str = "  ") -> list[str]:
         """Describe where each notification category of a group set goes.
@@ -2050,8 +2093,7 @@ class QQAdminPlugin(Star):
             min_account_level=min_level,
             keywords=review_keywords(review, request.group_id),
             question_type=review["question_type"],
-            manual_confirm=review["manual_confirm"],
-            unattended_action=review["unattended_action"],
+            default_action=review["default_action"],
         )
         logger.info(
             f"[QQAdmin] 进群申请 群{request.group_id} 用户{request.user_id} "
