@@ -29,8 +29,15 @@ from .core.config import (
     CAPABILITY_KEYS,
     DEFAULT_REVIEW_REJECT_REASON,
     MAX_BAN_DURATION,
-    NOTIFY_CATEGORY_RECEIPT,
-    NOTIFY_CATEGORY_REVIEW,
+    NOTIFY_CATEGORIES,
+    NOTIFY_CATEGORY_BAN,
+    NOTIFY_CATEGORY_BLACKLIST,
+    NOTIFY_CATEGORY_EXPORT,
+    NOTIFY_CATEGORY_KICK,
+    NOTIFY_CATEGORY_NOTICE,
+    NOTIFY_CATEGORY_RECALL,
+    NOTIFY_CATEGORY_REVIEW_ACTION,
+    NOTIFY_CATEGORY_REVIEW_NOTICE,
     build_group_index,
     find_group_set,
     find_group_set_by_name,
@@ -52,7 +59,7 @@ from .core.confirm import ConfirmManager, PendingAction
 from .core.export import Exporter, to_file_uri
 from .core.filters import mentioned_command
 from .core.messages import render_template
-from .core.notify import Notifier
+from .core.notify import Notifier, parse_manage_session
 from .core.onebot import ActionResult, OneBotClient
 from .core.permission import (
     PermissionContext,
@@ -564,6 +571,7 @@ class QQAdminPlugin(Star):
         stop: bool = True,
         receipt: bool = False,
         group_id: str = "",
+        category: str = "",
     ) -> AsyncGenerator[Any, None]:
         """Send a text reply and optionally stop the event.
 
@@ -577,7 +585,10 @@ class QQAdminPlugin(Star):
                 they may be withheld from the current session, mirrored into the
                 manage session, or both.
             group_id: Group the action happened in; selects the group set whose
-                manage session receives the mirrored receipt.
+                manage session receives the mirrored receipt. Defaults to the
+                event's group.
+            category: Routing category of the receipt. Defaults to ``禁言``,
+                which is the category of an unnamed management receipt.
 
         Yields:
             The message result for the pipeline to deliver.
@@ -590,7 +601,7 @@ class QQAdminPlugin(Star):
                 group_id or str(event.get_group_id() or ""),
             )
             targets = self.notifier.targets(
-                NOTIFY_CATEGORY_RECEIPT,
+                category or NOTIFY_CATEGORY_BAN,
                 origin=origin,
                 manage_session=str((group_set or {}).get("manage_session", "")),
             )
@@ -884,6 +895,7 @@ class QQAdminPlugin(Star):
             event,
             "\n".join(lines),
             receipt=True,
+            category=NOTIFY_CATEGORY_BAN,
             group_id=group_id,
         ):
             yield item
@@ -969,6 +981,7 @@ class QQAdminPlugin(Star):
                 event,
                 await self._describe_failure(result),
                 receipt=True,
+                category=NOTIFY_CATEGORY_BAN,
                 group_id=group_id,
             ):
                 yield item
@@ -994,6 +1007,7 @@ class QQAdminPlugin(Star):
             event,
             text,
             receipt=True,
+            category=NOTIFY_CATEGORY_BAN,
             group_id=group_id,
         ):
             yield item
@@ -1052,6 +1066,7 @@ class QQAdminPlugin(Star):
                     event,
                     self._text("whole_ban_off"),
                     receipt=True,
+                    category=NOTIFY_CATEGORY_BAN,
                     group_id=group_id,
                 ):
                     yield item
@@ -1067,6 +1082,7 @@ class QQAdminPlugin(Star):
                     event,
                     await self._describe_failure(result),
                     receipt=True,
+                    category=NOTIFY_CATEGORY_BAN,
                     group_id=group_id,
                 ):
                     yield item
@@ -1116,6 +1132,7 @@ class QQAdminPlugin(Star):
             event,
             "\n".join(lines),
             receipt=True,
+            category=NOTIFY_CATEGORY_BAN,
             group_id=group_id,
         ):
             yield item
@@ -1231,6 +1248,7 @@ class QQAdminPlugin(Star):
             event,
             "\n".join(lines),
             receipt=True,
+            category=NOTIFY_CATEGORY_KICK,
             group_id=group_id,
         ):
             yield item
@@ -1283,6 +1301,7 @@ class QQAdminPlugin(Star):
                 event,
                 self._text("recall_success"),
                 receipt=True,
+                category=NOTIFY_CATEGORY_RECALL,
                 group_id=group_id,
             ):
                 yield item
@@ -1299,6 +1318,7 @@ class QQAdminPlugin(Star):
                 event,
                 await self._describe_failure(result),
                 receipt=True,
+                category=NOTIFY_CATEGORY_RECALL,
                 group_id=group_id,
             ):
                 yield item
@@ -1366,6 +1386,7 @@ class QQAdminPlugin(Star):
                 event,
                 self._text("notice_success"),
                 receipt=True,
+                category=NOTIFY_CATEGORY_NOTICE,
                 group_id=group_id,
             ):
                 yield item
@@ -1386,6 +1407,7 @@ class QQAdminPlugin(Star):
                 event,
                 hint,
                 receipt=True,
+                category=NOTIFY_CATEGORY_NOTICE,
                 group_id=group_id,
             ):
                 yield item
@@ -1420,6 +1442,8 @@ class QQAdminPlugin(Star):
             "",
             "管理会话（群组配置里的「管理会话」）专供群管理员使用：进群审核通知、",
             "审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态 均可直接在那里执行。",
+            "  审核 通知设置 [群号或群组名]   查看该群组的通知路由",
+            "  黑名单 设置 [群号或群组名]     同上（别名）",
             "",
             "提示：指令与 @ 之间需要空格；时长与目标的位置可以互换；若与其他插件指令重名，",
             "可在 WebUI 的「插件 → 管理行为」中重命名。",
@@ -1498,6 +1522,8 @@ class QQAdminPlugin(Star):
         if duplicated:
             lines.append(f"  群组重名：{'、'.join(duplicated)}（同名群组共享黑名单）")
 
+        lines.append(self._text("notification_settings"))
+
         async for item in self._reply(event, "\n".join(lines)):
             yield item
 
@@ -1528,8 +1554,41 @@ class QQAdminPlugin(Star):
                 f" | 黑名单 {self.blacklist.count(str(group_set['name']))} 条"
                 f" | 进群审核 {'已开启' if review['enabled'] else '已关闭'}",
             )
+            lines.extend(self._notify_route_lines(group_set["name"], "    "))
         lines.append("  可用指令：审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态")
         return "\n".join(lines)
+
+    def _notify_route_lines(self, set_name: str, indent: str = "  ") -> list[str]:
+        """Describe where each notification category of a group set goes.
+
+        Args:
+            set_name: Name of the group set.
+            indent: Leading whitespace of every line.
+
+        Returns:
+            One line per category, plus a line listing the disabled categories.
+        """
+        group_set = find_group_set_by_name(self.group_sets, set_name)
+        manage = str((group_set or {}).get("manage_session") or "")
+        manage_ready = bool(parse_manage_session(manage))
+
+        lines = [f"{indent}通知路由："]
+        silent: list[str] = []
+        for category in NOTIFY_CATEGORIES:
+            targets: list[str] = []
+            if self.notifier.wants(category, "current"):
+                targets.append("当前会话")
+            if self.notifier.wants(category, "manage"):
+                targets.append(
+                    "管理会话" if manage_ready else "管理会话未配置（回退当前会话）"
+                )
+            if not targets:
+                silent.append(category)
+                continue
+            lines.append(f"{indent}  {category} → {'、'.join(targets)}")
+        if silent:
+            lines.append(f"{indent}  不发送：{'、'.join(silent)}")
+        return lines
 
     # ------------------------------------------------------------------ #
     #  Commands: blacklist
@@ -1673,6 +1732,7 @@ class QQAdminPlugin(Star):
             event,
             "\n".join(lines),
             receipt=True,
+            category=NOTIFY_CATEGORY_BLACKLIST,
             group_id=group_id,
         ):
             yield item
@@ -1756,6 +1816,7 @@ class QQAdminPlugin(Star):
             event,
             "\n".join(lines),
             receipt=True,
+            category=NOTIFY_CATEGORY_BLACKLIST,
             group_id=group_id,
         ):
             yield item
@@ -1792,7 +1853,28 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        group_set, error = self._select_group_set(event, str(args or ""))
+        arg = str(args or "").strip()
+        if arg in ("设置", "通知设置", "settings"):
+            group_set, error = self._select_group_set(event)
+            if error:
+                async for item in self._reply(event, error):
+                    yield item
+                return
+            if group_set is None:
+                async for item in self._reply(
+                    event,
+                    self._text("group_not_found", selector=group_id),
+                ):
+                    yield item
+                return
+            async for item in self._reply(
+                event,
+                "\n".join(self._notify_route_lines(str(group_set["name"]))),
+            ):
+                yield item
+            return
+
+        group_set, error = self._select_group_set(event, arg)
         if error:
             async for item in self._reply(event, error):
                 yield item
@@ -2254,9 +2336,6 @@ class QQAdminPlugin(Star):
             request: The join request.
             decision: The decision that was applied (or held).
         """
-        if not group_set.get("notice_enabled", True):
-            return
-
         # A manual decision reuses the same actions, so it needs its own label
         # instead of reporting the bot as having decided on its own.
         if decision.reason == "manual" and decision.action in ("approve", "reject"):
@@ -2300,7 +2379,7 @@ class QQAdminPlugin(Star):
                 )
 
         targets = self.notifier.targets(
-            NOTIFY_CATEGORY_REVIEW,
+            NOTIFY_CATEGORY_REVIEW_NOTICE,
             origin=str(event.unified_msg_origin or ""),
             manage_session=str(group_set.get("manage_session") or ""),
         )
@@ -2340,6 +2419,27 @@ class QQAdminPlugin(Star):
 
         tokens = str(args or "").split()
         pending = self._visible_pending(event)
+
+        if tokens and tokens[0] in ("通知设置", "通知", "settings"):
+            selector = tokens[1] if len(tokens) > 1 else ""
+            group_set, error = self._select_group_set(event, selector)
+            if error:
+                async for item in self._reply(event, error):
+                    yield item
+                return
+            if group_set is None:
+                async for item in self._reply(
+                    event,
+                    self._text("group_not_found", selector=selector or "当前群"),
+                ):
+                    yield item
+                return
+            async for item in self._reply(
+                event,
+                "\n".join(self._notify_route_lines(str(group_set["name"]))),
+            ):
+                yield item
+            return
 
         if not tokens or tokens[0] in ("列表", "list"):
             if not pending:
@@ -2398,6 +2498,7 @@ class QQAdminPlugin(Star):
                 event,
                 summary,
                 receipt=True,
+                category=NOTIFY_CATEGORY_REVIEW_ACTION,
                 group_id=request.group_id,
             ):
                 yield item
@@ -2415,6 +2516,7 @@ class QQAdminPlugin(Star):
                 event,
                 self._text("api_failed", error="协议端拒绝了该操作"),
                 receipt=True,
+                category=NOTIFY_CATEGORY_REVIEW_ACTION,
                 group_id=request.group_id,
             ):
                 yield item
@@ -2673,6 +2775,7 @@ class QQAdminPlugin(Star):
                 event,
                 self._text("export_failed", error=result.error),
                 receipt=True,
+                category=NOTIFY_CATEGORY_EXPORT,
                 group_id=group_id,
             ):
                 yield item
@@ -2717,6 +2820,7 @@ class QQAdminPlugin(Star):
             event,
             text,
             receipt=True,
+            category=NOTIFY_CATEGORY_EXPORT,
             group_id=group_id,
         ):
             yield item

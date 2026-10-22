@@ -84,13 +84,28 @@ GROUP_PRIVILEGED_ROLES: frozenset[str] = frozenset({"owner", "admin"})
 ALL_TARGET_KEYWORD = "全体"
 
 #: Message categories whose delivery route can be configured per session.
-NOTIFY_CATEGORY_RECEIPT = "操作回执"
-NOTIFY_CATEGORY_REVIEW = "进群审核通知"
+#: One category per management function, so an operator can keep, for example,
+#: ban receipts in the group while sending join review notices to the manage
+#: session only.
+NOTIFY_CATEGORY_BAN = "禁言"
+NOTIFY_CATEGORY_KICK = "踢人"
+NOTIFY_CATEGORY_RECALL = "撤回"
+NOTIFY_CATEGORY_NOTICE = "群公告"
+NOTIFY_CATEGORY_BLACKLIST = "黑名单"
+NOTIFY_CATEGORY_EXPORT = "群导出"
+NOTIFY_CATEGORY_REVIEW_ACTION = "审核处理回执"
+NOTIFY_CATEGORY_REVIEW_NOTICE = "进群审核通知"
 
 #: Every routable category, in the order the WebUI offers them.
 NOTIFY_CATEGORIES: tuple[str, ...] = (
-    NOTIFY_CATEGORY_RECEIPT,
-    NOTIFY_CATEGORY_REVIEW,
+    NOTIFY_CATEGORY_BAN,
+    NOTIFY_CATEGORY_KICK,
+    NOTIFY_CATEGORY_RECALL,
+    NOTIFY_CATEGORY_NOTICE,
+    NOTIFY_CATEGORY_BLACKLIST,
+    NOTIFY_CATEGORY_EXPORT,
+    NOTIFY_CATEGORY_REVIEW_ACTION,
+    NOTIFY_CATEGORY_REVIEW_NOTICE,
 )
 
 _TIME_RE = re.compile(r"^(\d+)\s*([smhd])?$", re.IGNORECASE)
@@ -496,9 +511,9 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
 
     Returns:
         A list of dicts with the keys ``name``, ``group_ids``,
-        ``manage_session``, ``notice_enabled`` and the per-group behaviour
-        settings produced by :func:`normalize_group_settings`. Entries without a
-        name and without any group id are skipped.
+        ``manage_session`` and the per-group behaviour settings produced by
+        :func:`normalize_group_settings`. Entries without a name and without any
+        group id are skipped.
     """
     if not isinstance(raw, (list, tuple)):
         return []
@@ -521,7 +536,6 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
                 "name": name,
                 "group_ids": group_ids,
                 "manage_session": str(item.get("manage_session") or "").strip(),
-                "notice_enabled": bool(item.get("notice_enabled", True)),
                 **normalize_group_settings(item),
             }
         )

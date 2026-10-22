@@ -56,6 +56,9 @@ DEFAULT_TEMPLATES: dict[str, str] = {
         "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"
     ),
     "group_not_found": "未找到群组：{selector}",
+    "notification_settings": (
+        "在管理会话发送「审核 通知设置 [群号或群组名]」可查看该群组的通知路由"
+    ),
     "member_header": "本群共 {count} 人（第 {page} 页）：",
     "member_list_failed": "无法获取群成员列表，请稍后重试",
     "export_success": "已导出{kind}表格（{count} 条）并上传到群文件",

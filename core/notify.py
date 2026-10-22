@@ -72,6 +72,22 @@ class Notifier:
         self._to_current = set(to_current)
         self._to_manage = set(to_manage)
 
+    def wants(self, category: str, target: str) -> bool:
+        """Report whether a category is routed to a target.
+
+        Unlike :meth:`targets` this ignores the fallback and the origin, so
+        callers can show the configured routing itself.
+
+        Args:
+            category: One of ``config.NOTIFY_CATEGORIES``.
+            target: ``"current"`` or ``"manage"``.
+
+        Returns:
+            ``True`` when the category is selected for that target.
+        """
+        selected = self._to_current if target == "current" else self._to_manage
+        return category in selected
+
     def targets(
         self,
         category: str,
