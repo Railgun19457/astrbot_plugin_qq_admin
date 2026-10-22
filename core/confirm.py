@@ -95,6 +95,26 @@ class ConfirmManager:
         """
         return self._enabled and action_key in self._require_for
 
+    def verdict(self, text: str) -> bool | None:
+        """Classify a reply as an agreement or a refusal.
+
+        Used by the join review flow, which lets an operator answer a
+        notification with the same words as the confirmation prompt.
+
+        Args:
+            text: Raw reply text.
+
+        Returns:
+            ``True`` for an agreement, ``False`` for a refusal and ``None`` when
+            the text is neither.
+        """
+        word = str(text or "").strip()
+        if word in self._confirm_words:
+            return True
+        if word in self._cancel_words:
+            return False
+        return None
+
     def build_prompt(self, summary: str) -> str:
         """Render the confirmation prompt.
 

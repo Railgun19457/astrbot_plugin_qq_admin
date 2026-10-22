@@ -21,8 +21,6 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "kick_success": "已将 {target_name}({target_id}) 移出本群",
     "recall_success": "已撤回指定消息",
     "notice_success": "群公告已更新",
-    "notice_empty": "当前没有群公告",
-    "notice_unsupported": "当前协议端不支持读取群公告",
     "no_permission": "你没有权限执行该操作：{reason}",
     "no_target": "请 @ 一个目标，或回复对方的消息后再执行本指令",
     "bad_duration": "时长格式不正确，示例：10m、2h、1d、600",
@@ -44,22 +42,21 @@ DEFAULT_TEMPLATES: dict[str, str] = {
         "答案：{comment}\n"
         "处理：{decision}（{reason}）"
     ),
-    "review_header": "待审核的进群申请共 {count} 条：",
-    "review_empty": "当前没有待审核的进群申请",
-    "review_bad_index": "编号超出范围（当前共 {count} 条）",
     "review_decided": "已{action} {user_id} 加入群 {group_id} 的申请",
-    "review_pending_hint": "回复「审核 同意 {index}」或「审核 拒绝 {index}」处理该申请",
+    "review_pending_hint": "引用本条消息回复「同意」或「拒绝」即可处理",
+    "review_reply_ambiguous": (
+        "当前有 {count} 条待处理申请，请引用对应的通知消息后再回复同意/拒绝"
+    ),
     "manage_unsupported": (
-        "该指令需要在目标群内执行。管理会话仅支持：审核、黑名单、拉黑、解除拉黑、群管状态"
+        "该指令需要在目标群内执行。管理会话仅支持：黑名单、拉黑、解除拉黑、群管状态"
     ),
     "manage_ambiguous": (
         "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"
     ),
     "group_not_found": "未找到群组：{selector}",
     "notification_settings": (
-        "在管理会话发送「审核 通知设置 [群号或群组名]」可查看该群组的通知路由"
+        "在管理会话发送「黑名单 通知设置 [群号或群组名]」可查看该群组的通知路由"
     ),
-    "member_header": "本群共 {count} 人（第 {page} 页）：",
     "member_list_failed": "无法获取群成员列表，请稍后重试",
     "export_success": "已导出{kind}表格（{count} 条）并上传到群文件",
     "export_local_only": "已生成{kind}表格（{count} 条），但上传失败。\n本地路径：{path}",

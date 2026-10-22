@@ -48,6 +48,8 @@ class JoinRequest:
         group_id: Group being joined.
         comment: Answer to the group question, or the invitation message.
         created_at: Unix timestamp when the request was observed.
+        notice_id: Platform message id of the notification sent for this
+            request, so a reply quoting that message can be matched back to it.
     """
 
     flag: str
@@ -56,6 +58,7 @@ class JoinRequest:
     group_id: str
     comment: str = ""
     created_at: float = 0.0
+    notice_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for persistence.
@@ -70,6 +73,7 @@ class JoinRequest:
             "group_id": self.group_id,
             "comment": self.comment,
             "created_at": self.created_at,
+            "notice_id": self.notice_id,
         }
 
     @classmethod
@@ -94,6 +98,7 @@ class JoinRequest:
             group_id=str(raw.get("group_id") or ""),
             comment=str(raw.get("comment") or ""),
             created_at=float(raw.get("created_at") or 0.0),
+            notice_id=str(raw.get("notice_id") or ""),
         )
 
 
@@ -299,6 +304,22 @@ class PendingReviewStore:
         self._store.data.pop(str(flag))
         self._store.save()
         return True
+
+    def set_notice_id(self, flag: str, notice_id: str) -> None:
+        """Remember which notification message belongs to a request.
+
+        The message id is what a reply has to quote to select this request, so
+        it is stored next to the request and survives a restart.
+
+        Args:
+            flag: Protocol token of the request.
+            notice_id: Platform message id of the sent notification.
+        """
+        raw = self._store.data.get(str(flag))
+        if not isinstance(raw, dict) or not notice_id:
+            return
+        raw["notice_id"] = str(notice_id)
+        self._store.save()
 
     def __len__(self) -> int:
         return len(self._store.data)

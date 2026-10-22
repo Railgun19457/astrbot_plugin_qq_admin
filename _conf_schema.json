@@ -50,7 +50,7 @@
           "manage_session": {
             "type": "string",
             "description": "管理会话",
-            "hint": "群管理员专用的会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456。审核通知默认发到这里，其中的「审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态」对该群组生效，发送「审核 通知设置」可查看通知路由；留空则通知发到申请所在群，且只能在各群内管理",
+            "hint": "群管理员专用的会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456。审核通知默认发到这里，其中的「黑名单 / 拉黑 / 解除拉黑 / 群管状态」对该群组生效，发送「黑名单 通知设置」可查看通知路由；留空则通知发到申请所在群，且只能在各群内管理",
             "default": ""
           },
           "default_ban_duration": {
@@ -359,8 +359,10 @@
           "type": "string"
         },
         "description": "取消词",
+        "hint": "同时用于进群审核通知的「拒绝」回复",
         "default": [
           "取消",
+          "拒绝",
           "否",
           "no"
         ]
@@ -403,7 +405,6 @@
           "禁言",
           "踢人",
           "撤回",
-          "群公告",
           "黑名单",
           "群导出",
           "审核处理回执",
@@ -413,7 +414,6 @@
           "禁言",
           "踢人",
           "撤回",
-          "群公告",
           "黑名单",
           "群导出",
           "审核处理回执"
@@ -427,7 +427,6 @@
           "禁言",
           "踢人",
           "撤回",
-          "群公告",
           "黑名单",
           "群导出",
           "审核处理回执",
@@ -505,16 +504,6 @@
         "type": "text",
         "description": "群公告发送成功",
         "default": "群公告已更新"
-      },
-      "notice_empty": {
-        "type": "text",
-        "description": "当前无群公告",
-        "default": "当前没有群公告"
-      },
-      "notice_unsupported": {
-        "type": "text",
-        "description": "协议端不支持读取群公告",
-        "default": "当前协议端不支持读取群公告"
       },
       "no_permission": {
         "type": "text",
@@ -606,23 +595,6 @@
         "hint": "可用占位符：{group_id} {user_id} {comment} {sub_type} {decision} {reason}",
         "default": "【进群申请】群 {group_id}\n申请人：{user_id}\n答案：{comment}\n处理：{decision}（{reason}）"
       },
-      "review_header": {
-        "type": "text",
-        "description": "待审核列表头部",
-        "hint": "可用占位符：{count}",
-        "default": "待审核的进群申请共 {count} 条："
-      },
-      "review_empty": {
-        "type": "text",
-        "description": "无待审核申请",
-        "default": "当前没有待审核的进群申请"
-      },
-      "review_bad_index": {
-        "type": "text",
-        "description": "审核编号越界",
-        "hint": "可用占位符：{count}",
-        "default": "编号超出范围（当前共 {count} 条）"
-      },
       "review_decided": {
         "type": "text",
         "description": "人工审核完成",
@@ -632,8 +604,8 @@
       "review_pending_hint": {
         "type": "text",
         "description": "待人工确认提示",
-        "hint": "可用占位符：{index}",
-        "default": "回复「审核 同意 {index}」或「审核 拒绝 {index}」处理该申请"
+        "hint": "提示用户引用通知消息回复同意/拒绝",
+        "default": "引用本条消息回复「同意」或「拒绝」即可处理"
       },
       "manage_unsupported": {
         "type": "text",
@@ -656,13 +628,7 @@
         "type": "text",
         "description": "通知设置提示",
         "hint": "提醒在管理会话里可以查看某个群组的通知路由",
-        "default": "在管理会话发送「审核 通知设置 [群号或群组名]」可查看该群组的通知路由"
-      },
-      "member_header": {
-        "type": "text",
-        "description": "群成员列表头部",
-        "hint": "可用占位符：{count} {page}",
-        "default": "本群共 {count} 人（第 {page} 页）："
+        "default": "在管理会话发送「黑名单 通知设置 [群号或群组名]」可查看该群组的通知路由"
       },
       "member_list_failed": {
         "type": "text",
@@ -692,6 +658,12 @@
         "description": "导出失败",
         "hint": "可用占位符：{error}",
         "default": "导出失败：{error}"
+      },
+      "review_reply_ambiguous": {
+        "type": "text",
+        "description": "多条待办时要求引用",
+        "hint": "可用占位符：{count}",
+        "default": "当前有 {count} 条待处理申请，请引用对应的通知消息后再回复同意/拒绝"
       }
     }
   }

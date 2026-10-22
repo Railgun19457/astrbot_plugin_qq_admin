@@ -34,7 +34,6 @@ from .core.config import (
     NOTIFY_CATEGORY_BLACKLIST,
     NOTIFY_CATEGORY_EXPORT,
     NOTIFY_CATEGORY_KICK,
-    NOTIFY_CATEGORY_NOTICE,
     NOTIFY_CATEGORY_RECALL,
     NOTIFY_CATEGORY_REVIEW_ACTION,
     NOTIFY_CATEGORY_REVIEW_NOTICE,
@@ -76,15 +75,11 @@ from .core.tools import TOOL_NAMES, build_tools, log_registered
 from .core.utils import (
     extract_at_targets,
     extract_reply_message_id,
-    shorten,
 )
 from .core.wholeban import RESTORE_GRACE, WholeBanRecord, WholeBanStore
 
 #: Platform adapter this plugin is able to drive.
 SUPPORTED_PLATFORM = "aiocqhttp"
-
-#: Maximum number of members rendered by the ``/群成员`` listing.
-MEMBER_PAGE_SIZE = 20
 
 
 @dataclass
@@ -321,7 +316,7 @@ class QQAdminPlugin(Star):
         )
         self._confirm_cancel_words = normalize_words(
             confirm_conf.get("cancel_words"),
-            ["取消", "否", "no"],
+            ["取消", "拒绝", "否", "no"],
         )
         self._confirm_require_for = normalize_bool_list(
             confirm_conf.get("require_for"),
@@ -436,16 +431,16 @@ class QQAdminPlugin(Star):
         self,
         event: AstrMessageEvent,
         *,
-        require_configured: bool = True,
         manage_ok: bool = False,
     ) -> bool:
         """Check the cheap preconditions shared by every command handler.
 
         Commands are silently ignored rather than answered when the plugin is
         disabled, when the adapter is not aiocqhttp (the OneBot actions this
-        plugin relies on do not exist elsewhere), or when the message does not
-        come from a group. Bailing out here also avoids the extra protocol calls
-        that permission resolution would otherwise make.
+        plugin relies on do not exist elsewhere), when the message does not come
+        from a group, or when the group is not managed. Bailing out here also
+        avoids the extra protocol calls that permission resolution would
+        otherwise make.
 
         A manage session counts as a valid place to run the commands that make
         sense there (``manage_ok``). For the others the event is stopped with a
@@ -454,9 +449,6 @@ class QQAdminPlugin(Star):
 
         Args:
             event: Event of the command.
-            require_configured: Whether the command may only run in a group that
-                belongs to a group set. ``/审核`` opts out so it also works in a
-                dedicated management group that is not itself managed.
             manage_ok: Whether the command is available inside a manage session.
 
         Returns:
@@ -470,8 +462,6 @@ class QQAdminPlugin(Star):
         if not group_id:
             return True
         if group_id in self.group_index:
-            return False
-        if not require_configured:
             return False
 
         if not self._manage_sets(event):
@@ -1324,93 +1314,8 @@ class QQAdminPlugin(Star):
                 yield item
 
     # ------------------------------------------------------------------ #
-    #  Commands: group notice / help / status
+    #  Commands: help / status
     # ------------------------------------------------------------------ #
-
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("群公告", alias={"notice"})
-    @filter.custom_filter(mentioned_command("群公告", "notice"))
-    async def notice(
-        self,
-        event: AstrMessageEvent,
-        content: GreedyStr,
-    ) -> AsyncGenerator[Any, None]:
-        """发送群公告；不带参数时查看当前公告。
-
-        Args:
-            event: 消息事件。
-            content: 公告正文。允许省略。
-        """
-        if await self._should_skip(event):
-            return
-        group_id = str(event.get_group_id())
-        operator = await self._permission_context(event)
-        text = str(content or "").strip()
-
-        allowed, deny_reason = check_capability(
-            operator,
-            self.permission_settings,
-            "notice",
-        )
-        if not allowed:
-            async for item in self._reply(
-                event,
-                self._text("no_permission", reason=deny_reason),
-            ):
-                yield item
-            return
-
-        if not text:
-            notices = await self.client.get_group_notice(event, group_id)
-            if not notices:
-                async for item in self._reply(
-                    event,
-                    self._text("notice_unsupported"),
-                ):
-                    yield item
-                return
-            latest = str(notices[-1].get("notice") or "").strip()
-            async for item in self._reply(event, latest or self._text("notice_empty")):
-                yield item
-            return
-
-        result = await self.client.send_group_notice(event, group_id, text)
-        if result.ok:
-            self._log_action(
-                "notice",
-                operator,
-                group_id=group_id,
-                content=shorten(text, 50),
-            )
-            async for item in self._reply(
-                event,
-                self._text("notice_success"),
-                receipt=True,
-                category=NOTIFY_CATEGORY_NOTICE,
-                group_id=group_id,
-            ):
-                yield item
-        else:
-            self._log_action(
-                "notice",
-                operator,
-                group_id=group_id,
-                result="failed",
-                error=result.error,
-            )
-            hint = (
-                self._text("api_unsupported")
-                if result.unsupported
-                else self._text("api_failed", error=result.error)
-            )
-            async for item in self._reply(
-                event,
-                hint,
-                receipt=True,
-                category=NOTIFY_CATEGORY_NOTICE,
-                group_id=group_id,
-            ):
-                yield item
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群管", alias={"qqadmin"})
@@ -1430,20 +1335,16 @@ class QQAdminPlugin(Star):
             "  解禁 @某人 / 解禁 全体",
             "  踢 @某人 [理由]            将成员移出本群",
             "  撤回                       回复目标消息后使用",
-            "  群公告 [内容]              不带内容则查看当前公告",
             "  拉黑 @某人 [原因] [时长]   加入本群组共享黑名单",
             "  解除拉黑 @某人             移出黑名单",
-            "  黑名单                     查看本群组黑名单",
-            "  群成员 [页码]              群成员概览",
+            "  黑名单 [群号/群组名]       查看本群组黑名单",
             "  群导出 成员 / 黑名单       导出 xlsx 并上传群文件",
-            "  审核 [列表]                查看待审核的进群申请",
-            "  审核 同意 / 拒绝 <编号>    处理指定申请",
             "  群管状态                   查看运行状态与群组归属",
             "",
+            "进群申请需要人工确认时，引用通知消息回复「同意」或「拒绝」即可处理。",
             "管理会话（群组配置里的「管理会话」）专供群管理员使用：进群审核通知、",
-            "审核 / 黑名单 / 拉黑 / 解除拉黑 / 群管状态 均可直接在那里执行。",
-            "  审核 通知设置 [群号或群组名]   查看该群组的通知路由",
-            "  黑名单 设置 [群号或群组名]     同上（别名）",
+            "黑名单 / 拉黑 / 解除拉黑 / 群管状态 均可直接在那里执行。",
+            "  黑名单 通知设置 [群号或群组名] 查看该群组的通知路由",
             "",
             "提示：指令与 @ 之间需要空格；时长与目标的位置可以互换；若与其他插件指令重名，",
             "可在 WebUI 的「插件 → 管理行为」中重命名。",
@@ -2299,27 +2200,182 @@ class QQAdminPlugin(Star):
             )
         return result.ok
 
-    def _visible_pending(self, event: AstrMessageEvent) -> list[Any]:
-        """List the pending join requests that a session may act on.
+    def _pending_for_session(self, event: AstrMessageEvent) -> list[Any]:
+        """List the pending join requests a session is responsible for.
 
-        A manage session only controls the groups of the sets that declared it,
-        so requests of other sets are hidden — their own manage session stays
-        responsible for them.
+        A manage session owns the groups of the sets that declared it, and a
+        managed group owns its own set, so a decision made in either place only
+        ever touches requests of that scope.
 
         Args:
-            event: Event of the ``/审核`` command.
+            event: Event of the reply.
 
         Returns:
-            Pending requests, oldest first.
+            Pending requests in scope, oldest first.
         """
-        pending = self.pending_reviews.load_all()
-        bound = self._manage_sets(event)
+        bound = list(self._manage_sets(event))
+        group_set = find_group_set(
+            self.group_sets,
+            str(event.get_group_id() or ""),
+        )
+        if group_set is not None:
+            bound.append(group_set)
         if not bound:
-            return pending
-        visible_groups = {
-            group_id for group_set in bound for group_id in group_set["group_ids"]
-        }
-        return [item for item in pending if item.group_id in visible_groups]
+            return []
+        scope = {group_id for item in bound for group_id in item["group_ids"]}
+        return [
+            request
+            for request in self.pending_reviews.load_all()
+            if request.group_id in scope
+        ]
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def handle_review_reply(self, event: AstrMessageEvent) -> None:
+        """Resolve a join request from a reply to its notification.
+
+        The notification for a request that needs a human decision is answered
+        by quoting it with an agreement or a refusal, so no separate command is
+        needed. The words are the confirmation words of the plugin
+        configuration, and the responder has to pass the ``review`` capability
+        check.
+
+        Args:
+            event: The incoming message event.
+        """
+        if not self.enabled:
+            return
+        if event.get_platform_name() != SUPPORTED_PLATFORM:
+            return
+
+        verdict = self.confirm.verdict(event.message_str)
+        if verdict is None:
+            return
+
+        message_id = extract_reply_message_id(event) or ""
+        candidates = self._pending_for_session(event)
+        if message_id:
+            # A quote selects exactly one notification; quoting anything else is
+            # not a decision on one of our requests.
+            request = next(
+                (item for item in candidates if item.notice_id == message_id),
+                None,
+            )
+        elif candidates:
+            # Without a quote the reply must be unambiguous.
+            request = candidates[0] if len(candidates) == 1 else None
+            if request is None:
+                event.stop_event()
+                event.should_call_llm(False)
+                await event.send(
+                    event.plain_result(
+                        self._text("review_reply_ambiguous", count=len(candidates)),
+                    ),
+                )
+                return
+        else:
+            request = None
+
+        if request is None:
+            return
+
+        allowed, deny_reason = await self._check_capability_for_event(
+            event,
+            "review",
+        )
+        if not allowed:
+            event.stop_event()
+            event.should_call_llm(False)
+            await event.send(
+                event.plain_result(
+                    self._text("no_permission", reason=deny_reason),
+                ),
+            )
+            return
+
+        action = "approve" if verdict else "reject"
+        ok = await self._apply_decision(event, request, action, "manual")
+        event.stop_event()
+        event.should_call_llm(False)
+        if not ok:
+            async for item in self._reply(
+                event,
+                self._text("api_failed", error="协议端拒绝了该操作"),
+                receipt=True,
+                category=NOTIFY_CATEGORY_REVIEW_ACTION,
+                group_id=request.group_id,
+            ):
+                await event.send(item)
+            return
+
+        group_set = find_group_set(self.group_sets, request.group_id)
+        async for item in self._reply(
+            event,
+            self._text(
+                "review_decided",
+                user_id=request.user_id,
+                group_id=request.group_id,
+                action="同意" if action == "approve" else "拒绝",
+            ),
+            receipt=True,
+            category=NOTIFY_CATEGORY_REVIEW_ACTION,
+            group_id=request.group_id,
+        ):
+            await event.send(item)
+        if group_set is not None:
+            await self._notify_review(
+                event,
+                group_set,
+                request,
+                _SimpleDecision(
+                    action,
+                    "manual",
+                    f"管理员 {event.get_sender_id()} 处理",
+                ),
+            )
+
+    async def _send_review_notice(
+        self,
+        event: AstrMessageEvent,
+        target: str,
+        text: str,
+    ) -> str:
+        """Send a review notification and report its platform message id.
+
+        The id is what a later reply has to quote, so it has to come from the
+        protocol response instead of the platform-agnostic
+        ``context.send_message``. When the target cannot be addressed through
+        OneBot the message is still delivered, just without an id.
+
+        Args:
+            event: Event providing the OneBot connection.
+            target: ``unified_msg_origin`` of the destination.
+            text: Message body.
+
+        Returns:
+            The message id, or an empty string when it could not be determined.
+        """
+        parts = str(target or "").split(":")
+        if len(parts) == 3 and parts[0] == SUPPORTED_PLATFORM:
+            action = {
+                "GroupMessage": ("send_group_msg", "group_id"),
+                "PrivateMessage": ("send_private_msg", "user_id"),
+            }.get(parts[1])
+            if action:
+                result = await self.client.call_action(
+                    event,
+                    action[0],
+                    **{action[1]: parts[2]},
+                    message=[{"type": "text", "data": {"text": text}}],
+                )
+                if result.ok and isinstance(result.data, dict):
+                    return str(result.data.get("message_id") or "")
+                logger.warning(
+                    f"[QQAdmin] 发送审核通知到 {target} 失败：{result.error}",
+                )
+
+        await self.notifier.send_to_session(target, text)
+        return ""
 
     async def _notify_review(
         self,
@@ -2363,20 +2419,7 @@ class QQAdminPlugin(Star):
             reason=decision.detail or decision.reason,
         )
         if decision.action == "hold":
-            pending = self.pending_reviews.load_all()
-            index = next(
-                (
-                    position
-                    for position, item in enumerate(pending, start=1)
-                    if item.flag == request.flag
-                ),
-                0,
-            )
-            if index:
-                text = (
-                    f"{text}\n"
-                    f"{render_template(self.templates, 'review_pending_hint', index=index)}"
-                )
+            text = f"{text}\n{render_template(self.templates, 'review_pending_hint')}"
 
         targets = self.notifier.targets(
             NOTIFY_CATEGORY_REVIEW_NOTICE,
@@ -2384,142 +2427,9 @@ class QQAdminPlugin(Star):
             manage_session=str(group_set.get("manage_session") or ""),
         )
         for target in targets:
-            await self.notifier.send_to_session(target, text)
-
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("审核", alias={"review"})
-    @filter.custom_filter(mentioned_command("审核", "review"))
-    async def review_command(
-        self,
-        event: AstrMessageEvent,
-        args: GreedyStr,
-    ) -> AsyncGenerator[Any, None]:
-        """处理待审核的进群申请：审核 / 审核 同意 <编号> / 审核 拒绝 <编号>。
-
-        Args:
-            event: 消息事件。
-            args: 子命令与编号。允许省略。
-        """
-        if await self._should_skip(event, require_configured=False):
-            return
-        operator = await self._permission_context(event)
-
-        allowed, deny_reason = check_capability(
-            operator,
-            self.permission_settings,
-            "review",
-        )
-        if not allowed:
-            async for item in self._reply(
-                event,
-                self._text("no_permission", reason=deny_reason),
-            ):
-                yield item
-            return
-
-        tokens = str(args or "").split()
-        pending = self._visible_pending(event)
-
-        if tokens and tokens[0] in ("通知设置", "通知", "settings"):
-            selector = tokens[1] if len(tokens) > 1 else ""
-            group_set, error = self._select_group_set(event, selector)
-            if error:
-                async for item in self._reply(event, error):
-                    yield item
-                return
-            if group_set is None:
-                async for item in self._reply(
-                    event,
-                    self._text("group_not_found", selector=selector or "当前群"),
-                ):
-                    yield item
-                return
-            async for item in self._reply(
-                event,
-                "\n".join(self._notify_route_lines(str(group_set["name"]))),
-            ):
-                yield item
-            return
-
-        if not tokens or tokens[0] in ("列表", "list"):
-            if not pending:
-                async for item in self._reply(event, self._text("review_empty")):
-                    yield item
-                return
-            lines = [self._text("review_header", count=len(pending))]
-            for index, request in enumerate(pending, start=1):
-                lines.append(
-                    f"{index}. 群{request.group_id} "
-                    f"{request.user_id} | {request.comment or '（无）'}",
-                )
-            lines.append(
-                "回复「审核 同意 <编号> [群号]」或「审核 拒绝 <编号> [群号]」处理"
-            )
-            async for item in self._reply(event, "\n".join(lines)):
-                yield item
-            return
-
-        verb = tokens[0]
-        rest = tokens[1:]
-        if verb not in ("同意", "拒绝") or not rest:
-            async for item in self._reply(
-                event,
-                "用法：审核 / 审核 列表 / 审核 同意 <编号> / 审核 拒绝 <编号>",
-            ):
-                yield item
-            return
-
-        if not rest[0].isdigit():
-            async for item in self._reply(event, "编号必须是数字"):
-                yield item
-            return
-
-        index = int(rest[0])
-        if not 1 <= index <= len(pending):
-            async for item in self._reply(
-                event,
-                self._text("review_bad_index", count=len(pending)),
-            ):
-                yield item
-            return
-
-        request = pending[index - 1]
-        action = "approve" if verb == "同意" else "reject"
-        ok = await self._apply_decision(event, request, action, "manual")
-        if ok:
-            group_set = find_group_set(self.group_sets, request.group_id)
-            summary = self._text(
-                "review_decided",
-                user_id=request.user_id,
-                group_id=request.group_id,
-                action="同意" if action == "approve" else "拒绝",
-            )
-            async for item in self._reply(
-                event,
-                summary,
-                receipt=True,
-                category=NOTIFY_CATEGORY_REVIEW_ACTION,
-                group_id=request.group_id,
-            ):
-                yield item
-            if group_set:
-                await self._notify_review(
-                    event,
-                    group_set,
-                    request,
-                    _SimpleDecision(
-                        action, "manual", f"管理员 {operator.user_id} 处理"
-                    ),
-                )
-        else:
-            async for item in self._reply(
-                event,
-                self._text("api_failed", error="协议端拒绝了该操作"),
-                receipt=True,
-                category=NOTIFY_CATEGORY_REVIEW_ACTION,
-                group_id=request.group_id,
-            ):
-                yield item
+            notice_id = await self._send_review_notice(event, target, text)
+            if notice_id:
+                self.pending_reviews.set_notice_id(request.flag, notice_id)
 
     # ------------------------------------------------------------------ #
     #  Helpers shared with the LLM tools
@@ -2630,68 +2540,8 @@ class QQAdminPlugin(Star):
         return str(group_set["name"]) if group_set else ""
 
     # ------------------------------------------------------------------ #
-    #  Commands: member list / export
+    #  Commands: export
     # ------------------------------------------------------------------ #
-
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("群成员", alias={"gmembers"})
-    @filter.custom_filter(mentioned_command("群成员", "gmembers"))
-    async def member_list(
-        self,
-        event: AstrMessageEvent,
-        page: str = "",
-    ) -> AsyncGenerator[Any, None]:
-        """查看群成员概览。
-
-        Args:
-            event: 消息事件。
-            page: 页码，从 1 开始。允许省略。
-        """
-        if await self._should_skip(event):
-            return
-        group_id = str(event.get_group_id())
-        operator = await self._permission_context(event)
-
-        allowed, deny_reason = check_capability(
-            operator,
-            self.permission_settings,
-            "query",
-        )
-        if not allowed:
-            async for item in self._reply(
-                event,
-                self._text("no_permission", reason=deny_reason),
-            ):
-                yield item
-            return
-
-        members = await self.client.get_group_member_list(event, group_id)
-        if not members:
-            async for item in self._reply(event, self._text("member_list_failed")):
-                yield item
-            return
-
-        page_number = int(page) if str(page).strip().isdigit() else 1
-        page_number = max(1, page_number)
-        total_pages = max(1, (len(members) + MEMBER_PAGE_SIZE - 1) // MEMBER_PAGE_SIZE)
-        page_number = min(page_number, total_pages)
-        start = (page_number - 1) * MEMBER_PAGE_SIZE
-        chunk = members[start : start + MEMBER_PAGE_SIZE]
-
-        lines = [self._text("member_header", count=len(members), page=page_number)]
-        for index, member in enumerate(chunk, start=start + 1):
-            name = member.get("card") or member.get("nickname") or member.get("user_id")
-            role = str(member.get("role") or "")
-            marker = {"owner": " [群主]", "admin": " [管理员]"}.get(role, "")
-            lines.append(f"{index}. {name}({member.get('user_id')}){marker}")
-        if page_number < total_pages:
-            lines.append(
-                f"第 {page_number}/{total_pages} 页，使用「群成员 {page_number + 1}」翻页"
-            )
-        elif total_pages > 1:
-            lines.append(f"第 {page_number}/{total_pages} 页（已到最后一页）")
-        async for item in self._reply(event, "\n".join(lines)):
-            yield item
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群导出", alias={"gexport"})
@@ -2862,8 +2712,8 @@ class QQAdminPlugin(Star):
         in-memory tasks are dropped here.
 
         Pending join requests are left alone for the same reason -- the protocol
-        token usually outlives a reload, so they can still be resolved through
-        ``/审核`` afterwards.
+        token usually outlives a reload, so they can still be resolved by
+        quoting their notification afterwards.
         """
         for task in list(self._whole_ban_tasks.values()):
             if not task.done():
