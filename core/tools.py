@@ -20,6 +20,7 @@ only reports what would happen and asks the model to confirm with the user.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,8 @@ TOOL_NAMES: tuple[str, ...] = (
     "qq_kick_member",
     "qq_recall_message",
     "qq_send_group_notice",
+    "qq_group_notice_query",
+    "qq_group_notice_delete",
     "qq_blacklist_add",
     "qq_blacklist_remove",
     "qq_blacklist_query",
@@ -84,6 +87,24 @@ def _no_group() -> str:
         The refusal text.
     """
     return "error: 当前会话不在已配置的群组中"
+
+
+def _format_notice_time(value: Any) -> str:
+    """Render an announcement timestamp.
+
+    Args:
+        value: Unix timestamp supplied by the protocol implementation.
+
+    Returns:
+        A ``YYYY-MM-DD HH:MM`` string, or ``时间未知`` when unusable.
+    """
+    try:
+        stamp = float(value or 0)
+    except (TypeError, ValueError):
+        return "时间未知"
+    if stamp <= 0:
+        return "时间未知"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
 
 
 def _umo(event: AstrMessageEvent) -> str:
@@ -525,12 +546,19 @@ class QqSendGroupNoticeTool(_PluginTool):
     """Publish a group announcement."""
 
     name: str = "qq_send_group_notice"
-    description: str = "发送群公告。内容会直接展示给全群成员。"
+    description: str = (
+        "发送群公告。内容会直接展示给全群成员。"
+        "公告发布后可以用 qq_group_notice_query 查看、qq_group_notice_delete 删除。"
+    )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "公告正文"},
+                "image": {
+                    "type": "string",
+                    "description": "可选配图，本地绝对路径或图片 URL；协议端不支持时会忽略",
+                },
                 "confirm": {
                     "type": "boolean",
                     "description": "公告会对全群可见，首次调用请传 false 向用户确认",
@@ -544,6 +572,7 @@ class QqSendGroupNoticeTool(_PluginTool):
         self,
         event: AstrMessageEvent,
         content: str,
+        image: str = "",
         confirm: bool = False,
     ) -> str:
         """Execute the announcement.
@@ -551,6 +580,7 @@ class QqSendGroupNoticeTool(_PluginTool):
         Args:
             event: The tool call event.
             content: Notice body.
+            image: Optional image path or URL.
             confirm: Must be ``True`` to actually publish.
 
         Returns:
@@ -568,12 +598,18 @@ class QqSendGroupNoticeTool(_PluginTool):
             return _denied(plugin, deny)
 
         if not confirm:
+            extra = f"（含配图 {image}）" if str(image or "").strip() else ""
             return (
-                f"待确认：发布群公告「{content[:50]}」。"
+                f"待确认：发布群公告「{content[:50]}」{extra}。"
                 "公告全群可见，请先向用户确认，同意后再把 confirm 设为 true 调用。"
             )
 
-        result = await plugin.client.send_group_notice(event, group_id, content)
+        result = await plugin.client.send_group_notice(
+            event,
+            group_id,
+            content,
+            image,
+        )
         if not result.ok:
             plugin._tool_audit(
                 "notice",
@@ -584,8 +620,146 @@ class QqSendGroupNoticeTool(_PluginTool):
             )
             return _failed(plugin, result.error, unsupported=result.unsupported)
 
-        plugin._tool_audit("notice", event, group_id=group_id, content=content[:50])
+        plugin._tool_audit(
+            "notice",
+            event,
+            group_id=group_id,
+            content=content[:50],
+            with_image=bool(str(image or "").strip()),
+        )
         return render_template(plugin.templates, "notice_success")
+
+
+@dataclass
+class QqGroupNoticeQueryTool(_PluginTool):
+    """List the current group announcements."""
+
+    name: str = "qq_group_notice_query"
+    description: str = (
+        "查看本群当前的群公告（含编号、发布者和时间）。删除公告需要先用本工具拿到编号。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    )
+
+    async def run(self, event: AstrMessageEvent) -> str:
+        """Execute the lookup.
+
+        Args:
+            event: The tool call event.
+
+        Returns:
+            A human readable result or an ``error:`` string.
+        """
+        plugin = self.plugin
+        group_id = plugin._tool_group_id(event)
+        if not group_id:
+            return _no_group()
+
+        allowed, deny = await plugin._tool_permission(event, "notice")
+        if not allowed:
+            return _denied(plugin, deny)
+
+        notices = await plugin.client.get_group_notice(event, group_id)
+        if not notices:
+            return "当前没有群公告，或协议端不支持读取公告（需 NapCat / Lagrange）"
+
+        lines = [f"共 {len(notices)} 条群公告（编号用于删除）："]
+        for index, notice in enumerate(notices, start=1):
+            body = notice.get("message")
+            text = ""
+            if isinstance(body, dict):
+                text = str(body.get("text") or "")
+            elif isinstance(body, str):
+                text = body
+            text = text.replace("\n", " ").strip() or "（无正文）"
+            lines.append(
+                f"{index}. #{notice.get('notice_id') or '未知'} "
+                f"{text[:80]} · 发布者 {notice.get('sender_id') or '未知'}"
+                f" · {_format_notice_time(notice.get('publish_time'))}",
+            )
+        return "\n".join(lines)
+
+
+@dataclass
+class QqGroupNoticeDeleteTool(_PluginTool):
+    """Delete a group announcement."""
+
+    name: str = "qq_group_notice_delete"
+    description: str = (
+        "删除本群的一条群公告。notice_id 先用 qq_group_notice_query 获取。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "notice_id": {"type": "string", "description": "公告编号"},
+                "confirm": {
+                    "type": "boolean",
+                    "description": "高危操作。首次调用请传 false 向用户确认",
+                },
+            },
+            "required": ["notice_id"],
+        },
+    )
+
+    async def run(
+        self,
+        event: AstrMessageEvent,
+        notice_id: str,
+        confirm: bool = False,
+    ) -> str:
+        """Execute the deletion.
+
+        Args:
+            event: The tool call event.
+            notice_id: Identifier from :class:`QqGroupNoticeQueryTool`.
+            confirm: Must be ``True`` to actually delete.
+
+        Returns:
+            A human readable result or an ``error:`` string.
+        """
+        plugin = self.plugin
+        group_id = plugin._tool_group_id(event)
+        if not group_id:
+            return _no_group()
+        target = str(notice_id or "").strip()
+        if not target:
+            return "error: 缺少 notice_id"
+
+        allowed, deny = await plugin._tool_permission(event, "notice")
+        if not allowed:
+            return _denied(plugin, deny)
+
+        if not confirm:
+            return (
+                f"待确认：删除群公告 #{target}。"
+                "请先向用户确认，同意后再把 confirm 设为 true 调用。"
+            )
+
+        result = await plugin.client.delete_group_notice(event, group_id, target)
+        if not result.ok:
+            plugin._tool_audit(
+                "notice_delete",
+                event,
+                group_id=group_id,
+                result="failed",
+                error=result.error,
+                notice_id=target,
+            )
+            return _failed(plugin, result.error, unsupported=result.unsupported)
+
+        plugin._tool_audit(
+            "notice_delete",
+            event,
+            group_id=group_id,
+            notice_id=target,
+        )
+        return render_template(plugin.templates, "notice_deleted")
 
 
 @dataclass
@@ -935,6 +1109,8 @@ def build_tools(plugin: QQAdminPlugin) -> dict[str, FunctionTool]:
         QqKickMemberTool,
         QqRecallMessageTool,
         QqSendGroupNoticeTool,
+        QqGroupNoticeQueryTool,
+        QqGroupNoticeDeleteTool,
         QqBlacklistAddTool,
         QqBlacklistRemoveTool,
         QqBlacklistQueryTool,

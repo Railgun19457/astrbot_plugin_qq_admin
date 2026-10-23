@@ -22,6 +22,7 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "kick_failed_in": "未能将目标移出群 {group}",
     "recall_success": "已撤回指定消息",
     "notice_success": "群公告已更新",
+    "notice_deleted": "群公告已删除",
     "no_permission": "你没有权限执行该操作：{reason}",
     "no_target": "请 @ 一个目标，或回复对方的消息后再执行本指令",
     "bad_duration": "时长格式不正确，示例：10m、2h、1d、600",

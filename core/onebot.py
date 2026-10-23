@@ -394,6 +394,7 @@ class OneBotClient:
         event: AstrMessageEvent,
         group_id: str,
         content: str,
+        image: str = "",
     ) -> ActionResult:
         """Publish a group announcement.
 
@@ -401,15 +402,67 @@ class OneBotClient:
             event: Message event.
             group_id: Target group.
             content: Notice body.
+            image: Optional image, either an absolute path or a URL.
+
+        Returns:
+            The action result.
+        """
+        params: dict[str, Any] = {
+            "group_id": self._as_int(group_id),
+            "content": str(content or ""),
+        }
+        if str(image or "").strip():
+            params["image"] = str(image).strip()
+        return await self.call_action(event, "_send_group_notice", **params)
+
+    async def get_group_notice(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+    ) -> list[dict[str, Any]]:
+        """List the current announcements of a group.
+
+        ``_get_group_notice`` is a protocol extension, so an implementation that
+        does not provide it simply returns an empty list.
+
+        Args:
+            event: Message event.
+            group_id: Target group.
+
+        Returns:
+            The raw notice payloads, oldest first; empty when unsupported.
+        """
+        result = await self.call_action(
+            event,
+            "_get_group_notice",
+            group_id=self._as_int(group_id),
+        )
+        if not result.ok:
+            return []
+        data = result.data if isinstance(result.data, list) else []
+        return [item for item in data if isinstance(item, dict)]
+
+    async def delete_group_notice(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        notice_id: str,
+    ) -> ActionResult:
+        """Delete a group announcement.
+
+        Args:
+            event: Message event.
+            group_id: Target group.
+            notice_id: Identifier returned by :meth:`get_group_notice`.
 
         Returns:
             The action result.
         """
         return await self.call_action(
             event,
-            "_send_group_notice",
+            "_del_group_notice",
             group_id=self._as_int(group_id),
-            content=str(content or ""),
+            notice_id=str(notice_id),
         )
 
     async def set_group_add_request(

@@ -15,6 +15,8 @@
       "qq_kick_member",
       "qq_recall_message",
       "qq_send_group_notice",
+      "qq_group_notice_query",
+      "qq_group_notice_delete",
       "qq_blacklist_add",
       "qq_blacklist_remove",
       "qq_blacklist_query",
@@ -676,6 +678,11 @@
         "description": "拉黑生效范围",
         "hint": "管理会话同时管理多个群组时追加的一行；可用占位符：{scopes}",
         "default": "生效群组：{scopes}"
+      },
+      "notice_deleted": {
+        "type": "text",
+        "description": "群公告删除成功",
+        "default": "群公告已删除"
       }
     }
   }

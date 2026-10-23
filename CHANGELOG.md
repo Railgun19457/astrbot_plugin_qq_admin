@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.12.0-2026-10-23
+
+### 新增
+
+- **群公告补齐查看与删除（仅 LLM 工具，不加指令入口）**：`qq_group_notice_query` 列出当前公告及其编号、发布者与时间；`qq_group_notice_delete` 按编号删除（需 `confirm=true`）。底层新增 `_get_group_notice` / `_del_group_notice` 调用，协议端不支持时明确提示
+- **群公告支持配图**：`qq_send_group_notice` 新增可选参数 `image`（本地绝对路径或图片 URL），协议端不支持时会被忽略
+
 ## v0.11.0-2026-10-23
 
 ### 变更
