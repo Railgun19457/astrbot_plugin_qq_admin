@@ -28,6 +28,7 @@ from astrbot.api import FunctionTool, logger
 
 from .config import MAX_BAN_DURATION, format_duration
 from .messages import render_template
+from .utils import extract_reply_message_id
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
@@ -488,23 +489,32 @@ class QqRecallMessageTool(_PluginTool):
     """Recall a message."""
 
     name: str = "qq_recall_message"
-    description: str = "撤回群内的一条消息。需要提供消息 ID。"
+    description: str = (
+        "撤回群内的一条消息。默认撤回用户引用的那条消息（用户「回复某条消息」后调用即可），"
+        "不需要消息 ID；只有在明确知道 ID 时才填 message_id。"
+    )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
-                "message_id": {"type": "string", "description": "要撤回的消息 ID"},
+                "message_id": {
+                    "type": "string",
+                    "description": "要撤回的消息 ID，通常省略（省略时撤回用户引用的消息）",
+                },
             },
-            "required": ["message_id"],
+            "required": [],
         },
     )
 
-    async def run(self, event: AstrMessageEvent, message_id: str) -> str:
+    async def run(self, event: AstrMessageEvent, message_id: str = "") -> str:
         """Execute the recall.
+
+        A model has no way to know a message id, so the quoted message is the
+        only usable target: it is the message the user replied to.
 
         Args:
             event: The tool call event.
-            message_id: Id of the message to recall.
+            message_id: Explicit id, optional.
 
         Returns:
             A human readable result or an ``error:`` string.
@@ -513,14 +523,18 @@ class QqRecallMessageTool(_PluginTool):
         group_id = plugin._tool_group_id(event)
         if not group_id:
             return _no_group()
-        if not str(message_id).strip():
-            return "error: 缺少 message_id"
+
+        target_id = str(message_id or "").strip() or str(
+            extract_reply_message_id(event) or "",
+        )
+        if not target_id:
+            return "error: 没有可撤回的目标。请让用户「回复」要撤回的那条消息后再调用本工具"
 
         allowed, deny = await plugin._tool_permission(event, "recall")
         if not allowed:
             return _denied(plugin, deny)
 
-        result = await plugin.client.delete_msg(event, str(message_id).strip())
+        result = await plugin.client.delete_msg(event, target_id)
         if not result.ok:
             plugin._tool_audit(
                 "recall",
@@ -528,7 +542,7 @@ class QqRecallMessageTool(_PluginTool):
                 group_id=group_id,
                 result="failed",
                 error=result.error,
-                message_id=str(message_id),
+                message_id=target_id,
             )
             return _failed(plugin, result.error, unsupported=result.unsupported)
 
@@ -536,7 +550,7 @@ class QqRecallMessageTool(_PluginTool):
             "recall",
             event,
             group_id=group_id,
-            message_id=str(message_id),
+            message_id=target_id,
         )
         return render_template(plugin.templates, "recall_success")
 
