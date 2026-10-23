@@ -46,6 +46,9 @@ DEFAULT_REVIEW_POLICY: dict[str, Any] = {
     "reject_reason": DEFAULT_REVIEW_REJECT_REASON,
 }
 
+#: How a blacklisted member is removed from groups.
+KICK_MODES: tuple[str, ...] = ("none", "current", "all")
+
 #: Built-in behaviour settings used by groups that belong to no group set.
 DEFAULT_GROUP_SETTINGS: dict[str, Any] = {
     "default_ban_duration": DEFAULT_BAN_DURATION,
@@ -53,7 +56,7 @@ DEFAULT_GROUP_SETTINGS: dict[str, Any] = {
         "enabled": True,
         "default_reason": DEFAULT_BLACKLIST_REASON,
         "block_message": False,
-        "kick_on_add": False,
+        "kick_on_add": "none",
     },
 }
 
@@ -520,10 +523,41 @@ def normalize_group_settings(raw: Any) -> dict[str, Any]:
                 or DEFAULT_BLACKLIST_REASON
             ),
             "block_message": bool(raw_blacklist.get("block_message", False)),
-            "kick_on_add": bool(raw_blacklist.get("kick_on_add", False)),
+            "kick_on_add": normalize_kick_mode(raw_blacklist.get("kick_on_add")),
         },
         "join_review": normalize_review_settings(source.get("join_review")),
     }
+
+
+def normalize_kick_mode(value: Any) -> str:
+    """Normalize the ``blacklist.kick_on_add`` setting.
+
+    Args:
+        value: Raw configuration value. ``True``/``False`` are accepted so a
+            configuration written before the mode existed keeps working.
+
+    Returns:
+        One of :data:`KICK_MODES`.
+    """
+    if isinstance(value, bool):
+        return "current" if value else "none"
+    text = str(value or "").strip().lower()
+    return text if text in KICK_MODES else "none"
+
+
+def kick_mode_label(mode: str) -> str:
+    """Describe a kick mode for display and receipts.
+
+    Args:
+        mode: One of :data:`KICK_MODES`.
+
+    Returns:
+        ``不踢出``, ``仅当前群`` or ``全群组``.
+    """
+    return {
+        "current": "仅当前群",
+        "all": "全群组",
+    }.get(str(mode or ""), "不踢出")
 
 
 def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:

@@ -81,6 +81,7 @@ def parse_target_args(
     at_targets: list[str],
     *,
     allow_reason: bool = True,
+    allow_duration: bool = True,
 ) -> TargetArgs:
     """Parse the argument tokens of a target command.
 
@@ -90,6 +91,10 @@ def parse_target_args(
             quoted message author.
         allow_reason: Whether leftover tokens form a free-form reason. Commands
             that record no reason keep them in ``unexpected`` instead.
+        allow_duration: Whether a duration may be given. A command that takes
+            none reports a ``7d``-style token through ``unknown_duration`` so
+            the caller can point at it; bare numbers are left alone because
+            they double as QQ numbers.
 
     Returns:
         A :class:`TargetArgs` describing the parsed intent. ``targets`` may be
@@ -119,6 +124,12 @@ def parse_target_args(
     for index, token in enumerate(remaining):
         if not _is_unit_duration(token):
             continue
+        if not allow_duration:
+            # The command takes no duration; report it so the caller can say so
+            # instead of quietly treating "7d" as part of a reason.
+            unknown_duration = token
+            remaining.pop(index)
+            break
         parsed = parse_duration(token, default=None)
         if parsed is None:
             unknown_duration = token
@@ -137,7 +148,7 @@ def parse_target_args(
 
     # A bare number is only a duration once a target is known; otherwise it was
     # meant as the target itself (``禁言 123456`` mutes that member).
-    if duration is None and not unknown_duration:
+    if allow_duration and duration is None and not unknown_duration:
         for index, token in enumerate(remaining):
             if not token.isdigit():
                 continue

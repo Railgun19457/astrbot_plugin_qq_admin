@@ -43,6 +43,7 @@ from .core.config import (
     group_review_policy,
     group_settings,
     is_all_target,
+    kick_mode_label,
     manage_group_sets,
     normalize_bool_list,
     normalize_group_sets,
@@ -1596,7 +1597,7 @@ class QQAdminPlugin(Star):
         lines.append(
             f"  黑名单：{'已启用' if blacklist_policy['enabled'] else '已关闭'}"
             f" | 发言拦截：{'已开启' if blacklist_policy['block_message'] else '已关闭'}"
-            f" | 拉黑踢出：{'已开启' if blacklist_policy['kick_on_add'] else '已关闭'}",
+            f" | 拉黑踢出：{kick_mode_label(blacklist_policy['kick_on_add'])}",
         )
         if review is None:
             review_line = "  进群审核：未配置（本群未加入任何群组）"
@@ -1656,6 +1657,88 @@ class QQAdminPlugin(Star):
             lines.extend(self._notify_route_lines(group_set["name"], "    "))
         lines.append("  可用指令：黑名单 / 拉黑 / 解除拉黑 / 群管状态")
         return "\n".join(lines)
+
+    async def _auto_kick_after_blacklist(
+        self,
+        event: AstrMessageEvent,
+        *,
+        group_set: dict[str, Any] | None,
+        group_id: str,
+        user_id: str,
+        nickname: str,
+        reason: str,
+        mode: str,
+        operator: str,
+        via: str = "",
+    ) -> list[str]:
+        """Remove a freshly blacklisted member from the configured groups.
+
+        Runs after a successful ``/拉黑`` or ``qq_blacklist_add``. ``current``
+        only touches the group the command was issued in; ``all`` walks every
+        group of the owning set, routing each action through the platform
+        instance that group is bound to.
+
+        Args:
+            event: Event providing the OneBot connection.
+            group_set: Owning group set, or ``None`` when unconfigured.
+            group_id: Group the blacklisting happened in.
+            user_id: Blacklisted QQ number.
+            nickname: Display name used in the receipt.
+            reason: Blacklist reason, recorded in the audit log.
+            mode: One of ``config.KICK_MODES``.
+            operator: QQ number of the operator, for the audit log.
+            via: Audit tag, e.g. ``llm_tool``.
+
+        Returns:
+            One receipt line per group, whether the kick succeeded or not.
+        """
+        if mode == "none":
+            return []
+
+        targets: list[tuple[str, str]] = []
+        for group in group_set["groups"] if group_set else []:
+            if mode == "current" and group["group_id"] != group_id:
+                continue
+            targets.append((group["group_id"], str(group["platform_id"] or "")))
+        if not targets:
+            # No group entry describes the target (the group is only known by
+            # id), so the current connection is the best available answer.
+            targets = [(group_id, "")]
+
+        lines: list[str] = []
+        for target_group, platform_id in targets:
+            result = await self._call_via(
+                event,
+                platform_id,
+                "set_group_kick",
+                group_id=target_group,
+                user_id=user_id,
+            )
+            self.audit.log(
+                "kick",
+                operator,
+                target=user_id,
+                group_id=target_group,
+                result="ok" if result.ok else "failed",
+                error="" if result.ok else result.error,
+                reason=reason,
+                trigger="blacklist_auto",
+                via=via,
+            )
+            if result.ok:
+                lines.append(
+                    self._text(
+                        "kick_success",
+                        target_name=nickname,
+                        target_id=user_id,
+                    ),
+                )
+            else:
+                lines.append(
+                    f"{self._text('kick_failed_in', group=target_group)}"
+                    f"：{result.error}",
+                )
+        return lines
 
     def _default_action_label(self, review: dict[str, Any]) -> str:
         """Describe the fallback behaviour of a join review policy.
@@ -1766,34 +1849,33 @@ class QQAdminPlugin(Star):
         parsed = parse_target_args(
             str(args or "").split(),
             extract_at_targets(event),
+            allow_duration=False,
         )
+        if parsed.unknown_duration:
+            async for item in self._reply(
+                event,
+                self._text("usage", usage="拉黑 [#群号] @某人 [原因]"),
+            ):
+                yield item
+            return
         if not parsed.targets:
             async for item in self._reply(event, self._text("no_target")):
                 yield item
             return
-        if parsed.unknown_duration:
-            async for item in self._reply(event, self._text("bad_duration")):
-                yield item
-            return
 
-        duration = parsed.duration if parsed.duration_specified else 0
         reason = parsed.reason or blacklist_policy["default_reason"]
         scope = self._scope(group_id, group_set)
+        kick_mode = str(blacklist_policy["kick_on_add"] or "none")
 
-        # Kicking only makes sense while acting inside the group itself; from a
-        # manage session the target may not even be a member of this chat.
-        auto_kick = blacklist_policy["kick_on_add"] and group_id in (
-            group_set["group_ids"] if group_set else []
-        )
         lines: list[str] = []
         for user_id in parsed.targets:
             nickname = await self._resolve_member_name(event, group_id, user_id)
-            entry = self.blacklist.add(
+            self.blacklist.add(
                 scope,
                 user_id,
                 reason=reason,
                 operator=operator.user_id,
-                duration=duration or 0,
+                duration=0,
                 nickname=nickname,
             )
             lines.append(
@@ -1802,9 +1884,7 @@ class QQAdminPlugin(Star):
                     target_name=nickname,
                     target_id=user_id,
                     reason=reason,
-                    duration=(
-                        format_duration(duration) if entry.is_temporary else "永久"
-                    ),
+                    duration="永久",
                 ),
             )
             self._log_action(
@@ -1814,40 +1894,19 @@ class QQAdminPlugin(Star):
                 group_id=group_id,
                 scope=scope,
                 reason=reason,
-                duration=duration or 0,
             )
-
-            if not auto_kick:
-                continue
-            kick = await self.client.set_group_kick(event, group_id, user_id)
-            if kick.ok:
-                lines.append(
-                    self._text(
-                        "kick_success",
-                        target_name=nickname,
-                        target_id=user_id,
-                    ),
-                )
-                self._log_action(
-                    "kick",
-                    operator,
-                    target=user_id,
+            lines.extend(
+                await self._auto_kick_after_blacklist(
+                    event,
+                    group_set=group_set,
                     group_id=group_id,
+                    user_id=user_id,
+                    nickname=nickname,
                     reason=reason,
-                    trigger="blacklist_auto",
-                )
-            else:
-                lines.append(await self._describe_failure(kick, user_id))
-                self._log_action(
-                    "kick",
-                    operator,
-                    target=user_id,
-                    group_id=group_id,
-                    result="failed",
-                    error=kick.error,
-                    reason=reason,
-                    trigger="blacklist_auto",
-                )
+                    mode=kick_mode,
+                    operator=operator.user_id,
+                ),
+            )
 
         async for item in self._reply(
             event,

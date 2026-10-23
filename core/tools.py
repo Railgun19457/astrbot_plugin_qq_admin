@@ -593,17 +593,16 @@ class QqBlacklistAddTool(_PluginTool):
     """Add a member to the shared blacklist."""
 
     name: str = "qq_blacklist_add"
-    description: str = "将成员加入本群组的共享黑名单。reason 是必填的拉黑原因，会记录并出现在导出表格中。"
+    description: str = (
+        "将成员永久加入本群组的共享黑名单。reason 是必填的拉黑原因，会记录并出现在导出表格中。"
+        "拉黑不会自动解除，需要时用 qq_blacklist_remove 移出。"
+    )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
                 "reason": {"type": "string", "description": "拉黑原因，必填"},
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
-                "duration_seconds": {
-                    "type": "integer",
-                    "description": "临时拉黑的秒数，0 或不填表示永久",
-                },
             },
             "required": ["reason"],
         },
@@ -614,7 +613,6 @@ class QqBlacklistAddTool(_PluginTool):
         event: AstrMessageEvent,
         reason: str,
         user_id: str = "",
-        duration_seconds: int = 0,
     ) -> str:
         """Execute the blacklisting.
 
@@ -622,7 +620,6 @@ class QqBlacklistAddTool(_PluginTool):
             event: The tool call event.
             reason: Why the user is blacklisted.
             user_id: Target QQ number, optional.
-            duration_seconds: Lifetime; ``0`` means permanent.
 
         Returns:
             A human readable result or an ``error:`` string.
@@ -645,18 +642,14 @@ class QqBlacklistAddTool(_PluginTool):
             return error
 
         final_reason = str(reason or "").strip() or blacklist_policy["default_reason"]
-        raw_duration = _safe_int(duration_seconds)
-        if raw_duration is None:
-            return "error: duration_seconds 必须是整数秒数，0 或省略表示永久"
-        duration = max(0, raw_duration)
         scope = plugin._scope(group_id, umo=_umo(event))
         name = await plugin._resolve_member_name(event, group_id, target)
-        entry = plugin.blacklist.add(
+        plugin.blacklist.add(
             scope,
             target,
             reason=final_reason,
             operator=str(event.get_sender_id() or ""),
-            duration=duration,
+            duration=0,
             nickname=name,
         )
 
@@ -667,7 +660,6 @@ class QqBlacklistAddTool(_PluginTool):
             group_id=group_id,
             scope=scope,
             reason=final_reason,
-            duration=duration,
         )
         text = render_template(
             plugin.templates,
@@ -675,43 +667,26 @@ class QqBlacklistAddTool(_PluginTool):
             target_name=name,
             target_id=target,
             reason=final_reason,
-            duration=format_duration(duration) if entry.is_temporary else "永久",
+            duration="永久",
         )
-        if not blacklist_policy["kick_on_add"]:
+        kick_mode = str(blacklist_policy["kick_on_add"] or "none")
+        if kick_mode == "none":
             return text
 
-        kick = await plugin.client.set_group_kick(event, group_id, target)
-        if kick.ok:
-            plugin._tool_audit(
-                "kick",
-                event,
-                target=target,
-                group_id=group_id,
-                reason=final_reason,
-                trigger="blacklist_auto",
-            )
-            return (
-                text
-                + "\n"
-                + render_template(
-                    plugin.templates,
-                    "kick_success",
-                    target_name=name,
-                    target_id=target,
-                )
-            )
-
-        plugin._tool_audit(
-            "kick",
+        lines = await plugin._auto_kick_after_blacklist(
             event,
-            target=target,
+            group_set=plugin._group_set_for(event),
             group_id=group_id,
-            result="failed",
-            error=kick.error,
+            user_id=target,
+            nickname=name,
             reason=final_reason,
-            trigger="blacklist_auto",
+            mode=kick_mode,
+            operator=str(event.get_sender_id() or ""),
+            via="llm_tool",
         )
-        return text + "\n" + _failed(plugin, kick.error, unsupported=kick.unsupported)
+        if not lines:
+            return text
+        return text + "\n" + "\n".join(lines)
 
 
 @dataclass

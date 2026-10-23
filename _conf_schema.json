@@ -82,13 +82,18 @@
                 "default": false
               },
               "kick_on_add": {
-                "type": "bool",
-                "description": "拉黑后自动踢出群聊",
-                "hint": "拉黑成功后把目标移出当前群（需踢人权限）；只作用于执行拉黑的群",
-                "default": false
+                "type": "string",
+                "description": "拉黑后踢出",
+                "hint": "none=不踢出；current=只把目标移出执行拉黑的这个群；all=移出该群组里的所有群（跨实例时会走对应实例执行）",
+                "options": [
+                  "none",
+                  "current",
+                  "all"
+                ],
+                "default": "none"
               }
             },
-            "hint": "组内所有群共享同一份黑名单"
+            "hint": "组内所有群共享同一份黑名单；拉黑是永久的，需要时用 /解除拉黑 移出"
           },
           "join_review": {
             "type": "object",
@@ -512,7 +517,7 @@
       "blacklist_added": {
         "type": "text",
         "description": "拉黑成功",
-        "hint": "可用占位符：{target_name} {target_id} {reason} {duration}",
+        "hint": "可用占位符：{target_name} {target_id} {reason} {duration}（拉黑为永久，{duration} 固定显示「永久」）",
         "default": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}\n期限：{duration}"
       },
       "blacklist_removed": {
@@ -665,6 +670,12 @@
         "description": "需要指定目标群",
         "hint": "可用占位符：{groups}",
         "default": "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：#123456；可用：{groups}"
+      },
+      "kick_failed_in": {
+        "type": "text",
+        "description": "拉黑自动踢出失败",
+        "hint": "可用占位符：{group}",
+        "default": "未能将目标移出群 {group}"
       }
     }
   }

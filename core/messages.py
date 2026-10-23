@@ -19,6 +19,7 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "whole_ban_off": "已解除全群禁言",
     "whole_ban_timed": "已开启全群禁言，将在 {duration} 后自动解除",
     "kick_success": "已将 {target_name}({target_id}) 移出本群",
+    "kick_failed_in": "未能将目标移出群 {group}",
     "recall_success": "已撤回指定消息",
     "notice_success": "群公告已更新",
     "no_permission": "你没有权限执行该操作：{reason}",
