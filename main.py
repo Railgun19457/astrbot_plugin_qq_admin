@@ -525,6 +525,7 @@ class QQAdminPlugin(Star):
             event,
             self.client,
             self.permission_settings,
+            is_manage_session=bool(self._manage_sets(event)),
         )
 
     async def _should_skip(
@@ -2647,6 +2648,13 @@ class QQAdminPlugin(Star):
         if verdict is None:
             return
 
+        # Claim this event before any asynchronous lookup. Otherwise the LLM
+        # handler may process the same "同意/拒绝" message and emit a
+        # misleading fallback while this handler is still resolving the
+        # notification.
+        event.stop_event()
+        event.should_call_llm(False)
+
         message_id = extract_reply_message_id(event) or ""
         candidates = self._pending_for_session(event)
         if message_id:
@@ -2660,8 +2668,6 @@ class QQAdminPlugin(Star):
             # Without a quote the reply must be unambiguous.
             request = candidates[0] if len(candidates) == 1 else None
             if request is None:
-                event.stop_event()
-                event.should_call_llm(False)
                 await event.send(
                     event.plain_result(
                         self._text("review_reply_ambiguous", count=len(candidates)),
@@ -2679,8 +2685,6 @@ class QQAdminPlugin(Star):
             "review",
         )
         if not allowed:
-            event.stop_event()
-            event.should_call_llm(False)
             await event.send(
                 event.plain_result(
                     self._text("no_permission", reason=deny_reason),
@@ -2690,8 +2694,6 @@ class QQAdminPlugin(Star):
 
         action = "approve" if verdict else "reject"
         ok = await self._apply_decision(event, request, action, "manual")
-        event.stop_event()
-        event.should_call_llm(False)
         if not ok:
             async for item in self._reply(
                 event,

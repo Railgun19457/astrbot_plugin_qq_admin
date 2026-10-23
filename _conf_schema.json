@@ -51,7 +51,7 @@
           "manage_session": {
             "type": "string",
             "description": "管理会话",
-            "hint": "群管理员控制台的会话 UMO（发 /sid 获取）。指令集与群内一致，需指定群时加 #群号；留空则通知发到申请所在群",
+            "hint": "群管理员控制台的会话 UMO（发 /sid 获取）。管理会话所在群的用户默认拥有本插件完整权限；指令集与群内一致，需指定群时加 #群号；留空则通知发到申请所在群",
             "default": ""
           },
           "default_ban_duration": {

@@ -35,6 +35,8 @@ class PermissionContext:
         is_allowlisted: Whether the user is in the plugin's custom allow-list.
         group_role: OneBot group role (``owner`` / ``admin`` / ``member``),
             ``None`` when it could not be determined.
+        is_manage_session: Whether the event came from a configured management
+            session.
     """
 
     user_id: str
@@ -42,6 +44,7 @@ class PermissionContext:
     is_astrbot_admin: bool
     is_allowlisted: bool
     group_role: str | None
+    is_manage_session: bool = False
 
     @property
     def is_group_privileged(self) -> bool:
@@ -56,7 +59,7 @@ class PermissionContext:
             A subset of ``{"any", "group_admin", "astrbot_admin"}``.
         """
         levels = {"any"}
-        if self.is_astrbot_admin or self.is_allowlisted:
+        if self.is_astrbot_admin or self.is_allowlisted or self.is_manage_session:
             levels.add("astrbot_admin")
             levels.add("group_admin")
         if self.is_group_privileged:
@@ -73,6 +76,8 @@ class PermissionContext:
             role = "AstrBot 管理员"
         elif self.is_allowlisted:
             role = "白名单用户"
+        elif self.is_manage_session:
+            role = "管理会话用户"
         elif self.group_role == "owner":
             role = "群主"
         elif self.group_role == "admin":
@@ -126,6 +131,7 @@ async def build_permission_context(
     settings: PermissionSettings,
     *,
     group_id: str | None = None,
+    is_manage_session: bool = False,
 ) -> PermissionContext:
     """Resolve the identity of the command issuer.
 
@@ -138,11 +144,16 @@ async def build_permission_context(
         client: OneBot facade used to look up the group role.
         settings: Parsed permission settings.
         group_id: Override for the group id; defaults to the event's group.
+        is_manage_session: Whether the event came from a configured management
+            session. Users in a management group receive full plugin access.
 
     Returns:
         A :class:`PermissionContext` describing the operator.
     """
     user_id = str(event.get_sender_id() or "")
+    if not user_id:
+        sender = getattr(getattr(event, "message_obj", None), "sender", None)
+        user_id = str(getattr(sender, "user_id", "") or "").strip()
     target_group = group_id if group_id is not None else str(event.get_group_id() or "")
 
     is_astrbot_admin = bool(settings.allow_astrbot_admin) and event.is_admin()
@@ -163,6 +174,7 @@ async def build_permission_context(
         group_id=target_group,
         is_astrbot_admin=is_astrbot_admin,
         is_allowlisted=is_allowlisted,
+        is_manage_session=is_manage_session,
         group_role=group_role,
     )
 
