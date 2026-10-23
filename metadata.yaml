@@ -2,7 +2,7 @@ name: astrbot_plugin_qq_admin
 display_name: QQ群管
 desc: 基于 OneBot v11 的 QQ 群管理插件，支持禁言、踢人、撤回、黑名单、多群分组、进群审核与管理会话
 short_desc: OneBot 群管理：禁言 / 踢人 / 撤回 / 黑名单 / 进群审核
-version: v0.7.1
+version: v0.8.0
 author: Railgun19457
 repo: https://github.com/Railgun19457/astrbot_plugin_qq_admin
 support_platforms:

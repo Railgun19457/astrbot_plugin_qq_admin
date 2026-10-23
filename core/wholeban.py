@@ -33,12 +33,16 @@ class WholeBanRecord:
         expires_at: Unix timestamp when the mute should be lifted.
         duration: Originally requested duration in seconds.
         operator: QQ number of the person who muted the group.
+        platform_id: Platform instance that muted the group. The mute can only
+            be lifted through the same account, so a restored timer has to be
+            routed back to it instead of guessing an instance.
     """
 
     group_id: str
     expires_at: float
     duration: int = 0
     operator: str = ""
+    platform_id: str = ""
 
     @property
     def remaining(self) -> int:
@@ -60,6 +64,7 @@ class WholeBanRecord:
             "expires_at": self.expires_at,
             "duration": self.duration,
             "operator": self.operator,
+            "platform_id": self.platform_id,
         }
 
     @classmethod
@@ -86,6 +91,7 @@ class WholeBanRecord:
             expires_at=expires_at,
             duration=int(raw.get("duration") or 0),
             operator=str(raw.get("operator") or ""),
+            platform_id=str(raw.get("platform_id") or ""),
         )
 
 
@@ -114,6 +120,7 @@ class WholeBanStore:
         expires_at: float,
         duration: int = 0,
         operator: str = "",
+        platform_id: str = "",
     ) -> WholeBanRecord:
         """Persist a scheduled mute.
 
@@ -122,6 +129,8 @@ class WholeBanStore:
             expires_at: Unix timestamp when the mute should be lifted.
             duration: Originally requested duration in seconds.
             operator: QQ number of the person who muted the group.
+            platform_id: Platform instance that muted the group, so the timer
+                can be restored through the same account.
 
         Returns:
             The stored record.
@@ -131,6 +140,7 @@ class WholeBanStore:
             expires_at=float(expires_at),
             duration=int(duration),
             operator=str(operator),
+            platform_id=str(platform_id),
         )
         self._store.data[str(group_id)] = entry.to_dict()
         self._store.save()

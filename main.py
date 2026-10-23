@@ -104,11 +104,9 @@ class QQAdminPlugin(Star):
         client: OneBot action facade.
         audit: Audit trail writer.
         confirm: High-risk action confirmation manager.
-        group_sets: Normalized group set definitions.
-        group_index: ``group_id -> set name`` lookup.
         group_sets: Normalized group set definitions, including each set's
             join review policy and cross-group exemptions.
-        group_index: ``group_id -> set name`` lookup.
+        group_index: ``group umo -> set name`` lookup.
         permission_settings: Parsed permission policy.
         templates: Message template mapping.
     """
@@ -136,7 +134,7 @@ class QQAdminPlugin(Star):
 
         logger.info(
             f"[QQAdmin] 已加载 | 群组 {len(self.group_sets)} 个 | "
-            f"索引 {len(self.group_index)} 个群",
+            f"索引 {len(self.group_index)} 个群会话",
         )
 
     @filter.on_platform_loaded()
@@ -152,14 +150,42 @@ class QQAdminPlugin(Star):
         if not records:
             return
 
-        platform = self._find_onebot_platform()
-        if platform is None:
-            logger.warning(
-                f"[QQAdmin] 有 {len(records)} 个全群禁言待恢复，但未找到可用的 "
-                "aiocqhttp 平台实例，已保留记录待下次启动重试",
-            )
-            return
+        by_instance: dict[str, list[Any]] = {}
+        for record in records:
+            by_instance.setdefault(str(record.platform_id or ""), []).append(record)
 
+        pending: list[Any] = []
+        for platform_id, items in by_instance.items():
+            platform = (
+                self._platform_client(platform_id)
+                if platform_id
+                else self._find_onebot_platform()
+            )
+            if platform is None:
+                # Guessing another instance could lift a mute through an
+                # account that is not even in the group, so the record is kept
+                # until the right instance is loaded again.
+                pending.extend(items)
+                continue
+            await self._restore_whole_bans(platform, items)
+
+        if pending:
+            logger.warning(
+                f"[QQAdmin] 有 {len(pending)} 个全群禁言待恢复，但对应的平台实例未加载，"
+                "已保留记录待下次启动重试",
+            )
+
+    async def _restore_whole_bans(
+        self,
+        platform: Any,
+        records: list[Any],
+    ) -> None:
+        """Re-arm the unmute timers of one platform instance.
+
+        Args:
+            platform: Live aiocqhttp platform instance that owns the mutes.
+            records: Mute records belonging to that instance.
+        """
         for record in records:
             status = await self._probe_whole_ban(platform, record.group_id)
             if status is False:
@@ -198,18 +224,89 @@ class QQAdminPlugin(Star):
         Returns:
             The platform instance, or ``None`` when unavailable.
         """
+        insts = self._onebot_platforms()
+        return insts[0] if insts else None
+
+    def _onebot_platforms(self) -> list[Any]:
+        """List every live aiocqhttp platform instance.
+
+        A deployment may run several QQ accounts; connecting a group to the
+        account that owns it needs the whole list, not just the first one.
+
+        Returns:
+            The available instances, in registration order.
+        """
         manager = getattr(self.context, "platform_manager", None)
         insts = getattr(manager, "platform_insts", None)
         if insts is None:
             getter = getattr(manager, "get_insts", None)
             insts = getter() if callable(getter) else []
+        result: list[Any] = []
         for inst in insts or []:
             try:
                 if inst.meta().name == SUPPORTED_PLATFORM:
+                    result.append(inst)
+            except Exception:  # noqa: BLE001, S112 - a foreign instance must not break us
+                continue
+        return result
+
+    def _platform_client(self, platform_id: str) -> Any | None:
+        """Resolve the OneBot source of a platform instance by its id.
+
+        Args:
+            platform_id: Platform instance id as it appears in a UMO.
+
+        Returns:
+            The platform instance, or ``None`` when it is not loaded.
+        """
+        for inst in self._onebot_platforms():
+            try:
+                if str(inst.meta().id) == str(platform_id):
                     return inst
-            except Exception:  # noqa: BLE001 - a foreign instance must not break us
+            except Exception:  # noqa: BLE001, S112 - meta() must not break routing
                 continue
         return None
+
+    async def _call_via(
+        self,
+        event: AstrMessageEvent,
+        platform_id: str,
+        action: str,
+        **params: Any,
+    ) -> ActionResult:
+        """Invoke a OneBot action through the platform instance that owns it.
+
+        A ``flag`` token, a group mute or a proactive message all belong to the
+        connection they were created on. When that connection is not the one the
+        current event arrived on (a manage session served by another QQ
+        account), sending through the event's connection would address the wrong
+        account, so the action is routed to the owning instance instead.
+
+        Args:
+            event: Event of the command, used when the instance matches.
+            platform_id: Platform instance id expected to own the resource.
+            action: OneBot action name.
+            **params: Action parameters.
+
+        Returns:
+            An :class:`ActionResult`. A missing instance is reported as a
+            failure instead of being retried on the wrong connection.
+        """
+        owner = str(platform_id or "")
+        if not owner or owner == str(event.get_platform_id() or ""):
+            return await self.client.call_action(event, action, **params)
+
+        instance = self._platform_client(owner)
+        if instance is None:
+            logger.warning(
+                f"[QQAdmin] 平台实例 {owner} 未加载，无法执行 `{action}`",
+            )
+            return ActionResult(
+                ok=False,
+                error=f"平台实例 {owner} 未加载",
+                unsupported=True,
+            )
+        return await self.client.call_action(instance, action, **params)
 
     async def _probe_whole_ban(
         self,
@@ -251,10 +348,13 @@ class QQAdminPlugin(Star):
         """
         self.group_sets = normalize_group_sets(config.get("group_sets"))
         self.group_index = build_group_index(self.group_sets)
+        managed = {
+            group_id for item in self.group_sets for group_id in item["group_ids"]
+        }
         for group_set in self.group_sets:
             for exemption in group_set["join_review"]["exemptions"]:
                 for group_id in exemption["target_group_ids"]:
-                    if group_id not in self.group_index:
+                    if group_id not in managed:
                         logger.warning(
                             f"[QQAdmin] 群组「{group_set['name']}」的跨群免审核中，"
                             f"目标群 {group_id} 未加入任何群组，该规则对它不会生效",
@@ -460,7 +560,7 @@ class QQAdminPlugin(Star):
         group_id = str(event.get_group_id() or "")
         if not group_id:
             return True
-        if group_id in self.group_index:
+        if self._group_set_for(event) is not None:
             return False
 
         if not self._manage_sets(event):
@@ -477,6 +577,26 @@ class QQAdminPlugin(Star):
         event.stop_event()
         event.should_call_llm(False)
         return True
+
+    def _group_set_for(self, event: AstrMessageEvent) -> dict[str, Any] | None:
+        """Find the group set owning the group an event came from.
+
+        The event's ``unified_msg_origin`` is matched first, so a group bound to
+        one platform instance wins over an entry that accepts every instance.
+
+        Args:
+            event: Event of the command.
+
+        Returns:
+            The owning group set, or ``None`` when the group is unmanaged.
+        """
+        if event.get_platform_name() != SUPPORTED_PLATFORM:
+            return None
+        return find_group_set(
+            self.group_sets,
+            str(event.get_group_id() or ""),
+            umo=str(event.unified_msg_origin or ""),
+        )
 
     def _manage_sets(self, event: AstrMessageEvent) -> list[dict[str, Any]]:
         """List the group sets that use this session as their manage session.
@@ -515,18 +635,16 @@ class QQAdminPlugin(Star):
         """
         text = str(selector or "").strip()
         if text:
-            target = find_group_set(self.group_sets, text) or find_group_set_by_name(
-                self.group_sets,
-                text,
+            target = (
+                find_group_set(self.group_sets, text)
+                or find_group_set(self.group_sets, umo=text)
+                or find_group_set_by_name(self.group_sets, text)
             )
             if target is None:
                 return None, self._text("group_not_found", selector=text)
             return target, ""
 
-        group_set = find_group_set(
-            self.group_sets,
-            str(event.get_group_id() or ""),
-        )
+        group_set = self._group_set_for(event)
         if group_set is not None:
             return group_set, ""
 
@@ -588,6 +706,7 @@ class QQAdminPlugin(Star):
             group_set = find_group_set(
                 self.group_sets,
                 group_id or str(event.get_group_id() or ""),
+                umo=origin,
             )
             target = self.notifier.manage_target(
                 str((group_set or {}).get("manage_session") or ""),
@@ -694,6 +813,7 @@ class QQAdminPlugin(Star):
             expires_at=time.time() + capped,
             duration=capped,
             operator=operator,
+            platform_id=str(event.get_platform_id() or ""),
         )
         self._arm_whole_ban_timer(event, group_id, capped)
 
@@ -836,7 +956,8 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        default_duration = self._policy(group_id)["default_ban_duration"]
+        group_set = self._group_set_for(event)
+        default_duration = self._policy(group_id, group_set)["default_ban_duration"]
         duration = parsed.duration if parsed.duration_specified else default_duration
         if duration is None:
             duration = default_duration
@@ -1378,7 +1499,7 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        group_set = find_group_set(self.group_sets, group_id)
+        group_set = self._group_set_for(event)
         if group_set is None:
             async for item in self._reply(event, self._manage_status(event)):
                 yield item
@@ -1392,9 +1513,9 @@ class QQAdminPlugin(Star):
             f"  管理会话：{group_set['manage_session'] or '未配置（通知回退到当前群）'}",
             f"  已配置群组总数：{len(self.group_sets)}",
         ]
-        policy = self._policy(group_id)
+        policy = self._policy(group_id, group_set)
         blacklist_policy = policy["blacklist"]
-        review = self._review_policy(group_id)
+        review = self._review_policy(group_id, group_set)
         lines.append(
             f"  默认禁言时长：{format_duration(policy['default_ban_duration'])}",
         )
@@ -1409,11 +1530,13 @@ class QQAdminPlugin(Star):
             review_line = f"  进群审核：{'已开启' if review['enabled'] else '已关闭'}"
             if review["enabled"]:
                 review_line += f" | 默认行为：{self._default_action_label(review)}"
-            sources = self._review_exempt_sources(group_id)
+            sources = self._review_exempt_sources(group_id, group_set)
             if sources and review["enabled"]:
                 review_line += f" | 跨群免审核：{len(sources)} 个来源群"
         lines.append(review_line)
-        lines.append(f"  黑名单条目：{self.blacklist.count(self._scope(group_id))}")
+        lines.append(
+            f"  黑名单条目：{self.blacklist.count(self._scope(group_id, group_set))}",
+        )
 
         conflicted = self._conflicting_groups()
         if conflicted:
@@ -1850,13 +1973,20 @@ class QQAdminPlugin(Star):
     #  Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _scope(self, group_id: str, group_set: dict[str, Any] | None = None) -> str:
+    def _scope(
+        self,
+        group_id: str,
+        group_set: dict[str, Any] | None = None,
+        *,
+        umo: str = "",
+    ) -> str:
         """Resolve the blacklist bucket for a group.
 
         Args:
             group_id: QQ group id.
             group_set: Owning group set when it is already known, which is the
                 case for commands run from a manage session.
+            umo: ``unified_msg_origin`` of the group, when known.
 
         Returns:
             The shared bucket key when the group belongs to a set, otherwise a
@@ -1864,18 +1994,21 @@ class QQAdminPlugin(Star):
         """
         if group_set is not None:
             return str(group_set["name"])
-        return resolve_blacklist_scope(self.group_sets, group_id)
+        return resolve_blacklist_scope(self.group_sets, group_id, umo=umo)
 
     def _policy(
         self,
         group_id: str,
         group_set: dict[str, Any] | None = None,
+        *,
+        umo: str = "",
     ) -> dict[str, Any]:
         """Resolve the behaviour settings that apply to a group.
 
         Args:
             group_id: QQ group id.
             group_set: Owning group set when it is already known.
+            umo: ``unified_msg_origin`` of the group, when known.
 
         Returns:
             A mapping with ``default_ban_duration`` and ``blacklist``. Built-in
@@ -1884,30 +2017,50 @@ class QQAdminPlugin(Star):
         """
         if group_set is not None:
             return group_set
-        return group_settings(self.group_sets, group_id)
+        return group_settings(self.group_sets, group_id, umo=umo)
 
-    def _review_policy(self, target_group_id: str) -> dict[str, Any] | None:
+    def _review_policy(
+        self,
+        target_group_id: str,
+        group_set: dict[str, Any] | None = None,
+        *,
+        umo: str = "",
+    ) -> dict[str, Any] | None:
         """Resolve the join review policy of a group.
 
         Args:
             target_group_id: QQ group being joined; selects the owning set.
+            group_set: Owning group set when it is already known.
+            umo: ``unified_msg_origin`` of the group, when known.
 
         Returns:
             The group set's policy, or ``None`` when the group belongs to no
             group set (automatic review never runs for unconfigured groups).
         """
-        return group_review_policy(self.group_sets, target_group_id)
+        if group_set is not None:
+            return group_set["join_review"]["policy"]
+        return group_review_policy(self.group_sets, target_group_id, umo=umo)
 
-    def _review_exempt_sources(self, target_group_id: str) -> list[str]:
+    def _review_exempt_sources(
+        self,
+        target_group_id: str,
+        group_set: dict[str, Any] | None = None,
+        *,
+        umo: str = "",
+    ) -> list[str]:
         """Collect the source groups that exempt a target group from review.
 
         Args:
             target_group_id: QQ group being joined.
+            group_set: Owning group set when it is already known.
+            umo: ``unified_msg_origin`` of the group, when known.
 
         Returns:
             Source group ids whose membership skips the remaining checks.
         """
-        return review_exempt_sources(self.group_sets, target_group_id)
+        if group_set is not None:
+            return review_exempt_sources(self.group_sets, target_group_id)
+        return review_exempt_sources(self.group_sets, target_group_id, umo=umo)
 
     def _conflicting_groups(self) -> list[str]:
         """List group ids appearing in more than one group set.
@@ -1946,14 +2099,15 @@ class QQAdminPlugin(Star):
         user_id = str(event.get_sender_id() or "")
         if not group_id or not user_id or user_id == str(event.get_self_id() or ""):
             return
-        if group_id not in self.group_index:
+        group_set = self._group_set_for(event)
+        if group_set is None:
             return
 
-        blacklist_policy = self._policy(group_id)["blacklist"]
+        blacklist_policy = self._policy(group_id, group_set)["blacklist"]
         if not blacklist_policy["enabled"] or not blacklist_policy["block_message"]:
             return
 
-        scope = self._scope(group_id)
+        scope = self._scope(group_id, group_set)
         if not self.blacklist.is_blacklisted(scope, user_id):
             return
 
@@ -2004,7 +2158,10 @@ class QQAdminPlugin(Star):
             return
 
         raw = getattr(event.message_obj, "raw_message", None)
-        request = parse_request_event(raw)
+        request = parse_request_event(
+            raw,
+            umo=str(event.unified_msg_origin or ""),
+        )
         if request is None:
             return
 
@@ -2029,19 +2186,23 @@ class QQAdminPlugin(Star):
 
         assert isinstance(request, JoinRequest)
 
-        group_set = find_group_set(self.group_sets, request.group_id)
+        group_set = find_group_set(
+            self.group_sets,
+            request.group_id,
+            umo=str(getattr(request, "umo", "") or ""),
+        )
         if group_set is None:
             logger.info(
                 f"[QQAdmin] 群 {request.group_id} 未加入任何群组，跳过自动审核",
             )
             return
 
-        policy = self._policy(request.group_id)
-        review = self._review_policy(request.group_id)
+        policy = self._policy(request.group_id, group_set)
+        review = self._review_policy(request.group_id, group_set)
         if review is None or not review["enabled"]:
             return
 
-        scope = self._scope(request.group_id)
+        scope = self._scope(request.group_id, group_set)
         is_blacklisted = (
             policy["blacklist"]["enabled"]
             and review["blacklist_reject"]
@@ -2050,7 +2211,7 @@ class QQAdminPlugin(Star):
                 request.user_id,
             )
         )
-        exemption_sources = self._review_exempt_sources(request.group_id)
+        exemption_sources = self._review_exempt_sources(request.group_id, group_set)
         is_exempt_member = (
             await self._member_of_any_group(event, request, exemption_sources)
             if exemption_sources
@@ -2179,6 +2340,10 @@ class QQAdminPlugin(Star):
     ) -> bool:
         """Approve or reject a join request through the protocol.
 
+        The ``flag`` token belongs to the connection that received the request,
+        so when the decision is taken from a session served by another platform
+        instance the action is routed back to the owning one.
+
         Args:
             event: Event providing the OneBot connection.
             request: The join request.
@@ -2192,22 +2357,35 @@ class QQAdminPlugin(Star):
             return False
 
         approve = action == "approve"
-        review = self._review_policy(request.group_id)
+        review = self._review_policy(
+            request.group_id,
+            umo=str(getattr(request, "umo", "") or ""),
+        )
         reject_reason = (
             review["reject_reason"] if review else DEFAULT_REVIEW_REJECT_REASON
         )
-        result = await self.client.set_group_add_request(
+
+        params: dict[str, Any] = {
+            "flag": str(request.flag),
+            "approve": bool(approve),
+        }
+        if not approve and reject_reason:
+            params["reason"] = str(reject_reason)
+        result = await self._call_via(
             event,
-            request.flag,
-            approve=approve,
-            reason="" if approve else reject_reason,
+            str(getattr(request, "platform_id", "") or ""),
+            "set_group_add_request",
+            **params,
         )
         self.audit.log(
             f"review_{action}",
             "system",
             target=request.user_id,
             group_id=request.group_id,
-            scope=self._scope(request.group_id),
+            scope=self._scope(
+                request.group_id,
+                umo=str(getattr(request, "umo", "") or ""),
+            ),
             result="ok" if result.ok else "failed",
             error=result.error,
             reason=reason,
@@ -2330,7 +2508,11 @@ class QQAdminPlugin(Star):
                 await event.send(item)
             return
 
-        group_set = find_group_set(self.group_sets, request.group_id)
+        group_set = find_group_set(
+            self.group_sets,
+            request.group_id,
+            umo=str(getattr(request, "umo", "") or ""),
+        )
         async for item in self._reply(
             event,
             self._text(
@@ -2369,6 +2551,10 @@ class QQAdminPlugin(Star):
         ``context.send_message``. When the target cannot be addressed through
         OneBot the message is still delivered, just without an id.
 
+        The destination may live on a different platform instance than the event
+        (a manage session served by another QQ account), in which case the send
+        is routed to that instance.
+
         Args:
             event: Event providing the OneBot connection.
             target: ``unified_msg_origin`` of the destination.
@@ -2378,23 +2564,23 @@ class QQAdminPlugin(Star):
             The message id, or an empty string when it could not be determined.
         """
         parts = str(target or "").split(":")
-        if len(parts) == 3 and parts[0] == SUPPORTED_PLATFORM:
+        if len(parts) == 3 and parts[1] in ("GroupMessage", "PrivateMessage"):
             action = {
                 "GroupMessage": ("send_group_msg", "group_id"),
                 "PrivateMessage": ("send_private_msg", "user_id"),
-            }.get(parts[1])
-            if action:
-                result = await self.client.call_action(
-                    event,
-                    action[0],
-                    **{action[1]: parts[2]},
-                    message=[{"type": "text", "data": {"text": text}}],
-                )
-                if result.ok and isinstance(result.data, dict):
-                    return str(result.data.get("message_id") or "")
-                logger.warning(
-                    f"[QQAdmin] 发送审核通知到 {target} 失败：{result.error}",
-                )
+            }[parts[1]]
+            result = await self._call_via(
+                event,
+                parts[0],
+                action[0],
+                **{action[1]: parts[2]},
+                message=[{"type": "text", "data": {"text": text}}],
+            )
+            if result.ok and isinstance(result.data, dict):
+                return str(result.data.get("message_id") or "")
+            logger.warning(
+                f"[QQAdmin] 发送审核通知到 {target} 失败：{result.error}",
+            )
 
         await self.notifier.send_to_session(target, text)
         return ""
@@ -2474,7 +2660,7 @@ class QQAdminPlugin(Star):
         if event.get_platform_name() != SUPPORTED_PLATFORM:
             return ""
         group_id = str(event.get_group_id() or "")
-        return group_id if group_id in self.group_index else ""
+        return group_id if self._group_set_for(event) is not None else ""
 
     def _extract_targets(self, event: AstrMessageEvent) -> list[str]:
         """Extract ``@`` targets from an event.
@@ -2547,17 +2733,18 @@ class QQAdminPlugin(Star):
             **detail,
         )
 
-    def _group_set_name(self, group_id: str) -> str:
+    def _group_set_name(self, group_id: str, *, umo: str = "") -> str:
         """Return the name of the group set owning a group.
 
         Args:
             group_id: QQ group id.
+            umo: ``unified_msg_origin`` of the group, when known.
 
         Returns:
             The group set name, or an empty string when the group is
             unconfigured.
         """
-        group_set = find_group_set(self.group_sets, group_id)
+        group_set = find_group_set(self.group_sets, group_id, umo=umo)
         return str(group_set["name"]) if group_set else ""
 
     # ------------------------------------------------------------------ #

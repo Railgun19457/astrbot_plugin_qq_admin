@@ -86,6 +86,21 @@ def _no_group() -> str:
     return "error: 当前会话不在已配置的群组中"
 
 
+def _umo(event: AstrMessageEvent) -> str:
+    """Return the event's ``unified_msg_origin``.
+
+    Group configuration is matched by UMO, so a group bound to one platform
+    instance is not confused with the same group number on another account.
+
+    Args:
+        event: The tool call event.
+
+    Returns:
+        The session UMO, or an empty string when unavailable.
+    """
+    return str(getattr(event, "unified_msg_origin", "") or "")
+
+
 def _safe_int(value: Any) -> int | None:
     """Coerce a model supplied value into an integer without raising.
 
@@ -635,7 +650,7 @@ class QqBlacklistAddTool(_PluginTool):
         if not allowed:
             return _denied(plugin, deny)
 
-        blacklist_policy = plugin._policy(group_id)["blacklist"]
+        blacklist_policy = plugin._policy(group_id, umo=_umo(event))["blacklist"]
         if not blacklist_policy["enabled"]:
             return "error: " + render_template(plugin.templates, "blacklist_disabled")
 
@@ -648,7 +663,7 @@ class QqBlacklistAddTool(_PluginTool):
         if raw_duration is None:
             return "error: duration_seconds 必须是整数秒数，0 或省略表示永久"
         duration = max(0, raw_duration)
-        scope = plugin._scope(group_id)
+        scope = plugin._scope(group_id, umo=_umo(event))
         name = await plugin._resolve_member_name(event, group_id, target)
         entry = plugin.blacklist.add(
             scope,
@@ -752,7 +767,7 @@ class QqBlacklistRemoveTool(_PluginTool):
         if error:
             return error
 
-        scope = plugin._scope(group_id)
+        scope = plugin._scope(group_id, umo=_umo(event))
         name = await plugin._resolve_member_name(event, group_id, target)
         if not plugin.blacklist.remove(scope, target):
             return render_template(
@@ -809,10 +824,10 @@ class QqBlacklistQueryTool(_PluginTool):
         if not allowed:
             return _denied(plugin, deny)
 
-        if not plugin._policy(group_id)["blacklist"]["enabled"]:
+        if not plugin._policy(group_id, umo=_umo(event))["blacklist"]["enabled"]:
             return "error: " + render_template(plugin.templates, "blacklist_disabled")
 
-        scope = plugin._scope(group_id)
+        scope = plugin._scope(group_id, umo=_umo(event))
         entries = plugin.blacklist.list_entries(scope)
         if not entries:
             return render_template(plugin.templates, "blacklist_empty", scope=scope)
@@ -873,7 +888,7 @@ class QqGroupInfoTool(_PluginTool):
                 f"群主：{owner.get('nickname') or owner.get('user_id')}"
                 f"({owner.get('user_id')})",
             )
-        group_set = plugin._group_set_name(group_id)
+        group_set = plugin._group_set_name(group_id, umo=_umo(event))
         lines.append(f"所属群组：{group_set or '未加入任何群组'}")
         return "\n".join(lines)
 

@@ -50,6 +50,10 @@ class JoinRequest:
         created_at: Unix timestamp when the request was observed.
         notice_id: Platform message id of the notification sent for this
             request, so a reply quoting that message can be matched back to it.
+        umo: ``unified_msg_origin`` of the group the request arrived in. The
+            ``flag`` token and the decision both belong to that platform
+            instance, so a decision taken elsewhere (for example in a manage
+            session served by another account) must be sent back through it.
     """
 
     flag: str
@@ -59,6 +63,13 @@ class JoinRequest:
     comment: str = ""
     created_at: float = 0.0
     notice_id: str = ""
+    umo: str = ""
+
+    @property
+    def platform_id(self) -> str:
+        """Platform instance id that received the request."""
+        parts = str(self.umo or "").split(":")
+        return parts[0] if len(parts) == 3 else ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for persistence.
@@ -74,6 +85,7 @@ class JoinRequest:
             "comment": self.comment,
             "created_at": self.created_at,
             "notice_id": self.notice_id,
+            "umo": self.umo,
         }
 
     @classmethod
@@ -99,6 +111,7 @@ class JoinRequest:
             comment=str(raw.get("comment") or ""),
             created_at=float(raw.get("created_at") or 0.0),
             notice_id=str(raw.get("notice_id") or ""),
+            umo=str(raw.get("umo") or ""),
         )
 
 
@@ -117,11 +130,13 @@ class ReviewDecision:
     detail: str = ""
 
 
-def parse_request_event(raw: Any) -> JoinRequest | None:
+def parse_request_event(raw: Any, *, umo: str = "") -> JoinRequest | None:
     """Extract a group join request from a raw adapter event.
 
     Args:
         raw: ``event.message_obj.raw_message``.
+        umo: ``unified_msg_origin`` of the group the request arrived in, so the
+            decision can later be sent back through the same platform instance.
 
     Returns:
         The parsed request, or ``None`` when the event is not a group join
@@ -148,6 +163,7 @@ def parse_request_event(raw: Any) -> JoinRequest | None:
         group_id=group_id,
         comment=str(raw.get("comment") or "").strip(),
         created_at=time.time(),
+        umo=str(umo or ""),
     )
 
 

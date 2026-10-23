@@ -116,6 +116,15 @@ NOTIFY_REVIEW_TARGETS: tuple[str, ...] = ("origin", "manage", "both", "none")
 #: Default destination of the join review notice.
 DEFAULT_REVIEW_NOTICE_TARGET: str = "manage"
 
+#: Message type value used inside a group ``unified_msg_origin``.
+GROUP_MESSAGE_TYPE: str = "GroupMessage"
+
+#: Platform part of a group UMO that matches every platform instance. A bare
+#: group number in the configuration is stored this way, so a single account
+#: deployment stays readable while a multi-account one can bind a group to one
+#: specific instance.
+ANY_PLATFORM: str = "*"
+
 _TIME_RE = re.compile(r"^(\d+)\s*([smhd])?$", re.IGNORECASE)
 
 
@@ -423,38 +432,45 @@ def review_keywords(policy: dict[str, Any], group_id: str) -> list[str]:
 def group_review_policy(
     group_sets: list[dict[str, Any]],
     target_group_id: str,
+    *,
+    umo: str = "",
 ) -> dict[str, Any] | None:
     """Resolve the join review policy of a group.
 
     Args:
         group_sets: Output of :func:`normalize_group_sets`.
         target_group_id: Group being joined; chooses the owning group set.
+        umo: ``unified_msg_origin`` of the group, when known.
 
     Returns:
         The owning group set's policy, or ``None`` when the group belongs to no
         set (automatic review only runs for configured groups).
     """
-    group_set = find_group_set(group_sets, target_group_id)
+    group_set = find_group_set(group_sets, target_group_id, umo=umo)
     return group_set["join_review"]["policy"] if group_set else None
 
 
 def review_exempt_sources(
     group_sets: list[dict[str, Any]],
     target_group_id: str,
+    *,
+    umo: str = "",
 ) -> list[str]:
     """Collect the source groups that exempt a target group from review.
 
     Exemptions are defined on the group set owning the target group; multiple
-    matching entries are merged.
+    matching entries are merged. Exemption ids are bare group numbers: a group
+    number identifies the group itself, whichever bot instance is asking.
 
     Args:
         group_sets: Output of :func:`normalize_group_sets`.
         target_group_id: QQ group being joined.
+        umo: ``unified_msg_origin`` of the group, when known.
 
     Returns:
         De-duplicated source group ids; empty when no exemption applies.
     """
-    group_set = find_group_set(group_sets, target_group_id)
+    group_set = find_group_set(group_sets, target_group_id, umo=umo)
     if group_set is None:
         return []
     sources: list[str] = []
@@ -517,10 +533,11 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
         raw: Raw value from the plugin configuration.
 
     Returns:
-        A list of dicts with the keys ``name``, ``group_ids``,
-        ``manage_session`` and the per-group behaviour settings produced by
+        A list of dicts with the keys ``name``, ``groups`` (normalized group
+        entries), ``group_ids`` (their bare group numbers), ``manage_session``
+        and the per-group behaviour settings produced by
         :func:`normalize_group_settings`. Entries without a name and without any
-        group id are skipped.
+        group are skipped.
     """
     if not isinstance(raw, (list, tuple)):
         return []
@@ -531,9 +548,17 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
             logger.warning(f"[QQAdmin] 群组配置第 {index + 1} 项不是对象，已忽略")
             continue
 
-        group_ids = normalize_id_list(item.get("group_ids"))
+        groups: list[dict[str, Any]] = []
+        for entry in normalize_id_list(item.get("group_ids")):
+            group = normalize_group_entry(entry)
+            if group is None:
+                continue
+            if any(existing["umo"] == group["umo"] for existing in groups):
+                continue
+            groups.append(group)
+
         name = str(item.get("name") or "").strip()
-        if not group_ids and not name:
+        if not groups and not name:
             continue
         if not name:
             name = f"群组{index + 1}"
@@ -541,7 +566,8 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
         result.append(
             {
                 "name": name,
-                "group_ids": group_ids,
+                "groups": groups,
+                "group_ids": [group["group_id"] for group in groups],
                 "manage_session": str(item.get("manage_session") or "").strip(),
                 **normalize_group_settings(item),
             }
@@ -550,18 +576,21 @@ def normalize_group_sets(raw: Any) -> list[dict[str, Any]]:
 
 
 def build_group_index(group_sets: list[dict[str, Any]]) -> dict[str, str]:
-    """Build a ``group_id -> group set name`` index.
+    """Build a ``group umo -> group set name`` index.
 
-    When the same group id appears in multiple sets the first occurrence wins
-    and a warning is logged; conflicting entries are never silently dropped.
-    A duplicate *set name* is warned about as well, because the name doubles as
-    the blacklist bucket key and would silently merge two sets' entries.
+    Every managed group is addressed by a ``unified_msg_origin``, so a
+    deployment with several platform instances can bind one group to one
+    account. The same group id appears in multiple sets the first occurrence
+    wins and a warning is logged; conflicting entries are never silently
+    dropped. A duplicate *set name* is warned about as well, because the name
+    doubles as the blacklist bucket key and would silently merge two sets'
+    entries.
 
     Args:
         group_sets: Output of :func:`normalize_group_sets`.
 
     Returns:
-        Mapping from group id to the owning set name.
+        Mapping from group UMO to the owning set name.
     """
     names = [group_set["name"] for group_set in group_sets]
     duplicated = sorted({name for name in names if names.count(name) > 1})
@@ -574,37 +603,126 @@ def build_group_index(group_sets: list[dict[str, Any]]) -> dict[str, str]:
     index: dict[str, str] = {}
     for group_set in group_sets:
         name = group_set["name"]
-        for group_id in group_set["group_ids"]:
-            existing = index.get(group_id)
+        for group in group_set["groups"]:
+            umo = group["umo"]
+            existing = index.get(umo)
             if existing is not None:
                 logger.warning(
-                    f"[QQAdmin] 群 {group_id} 同时出现在群组「{existing}」和"
+                    f"[QQAdmin] 群 {group['label']} 同时出现在群组「{existing}」和"
                     f"「{name}」中，以先出现的「{existing}」为准",
                 )
                 continue
-            index[group_id] = name
+            index[umo] = name
     return index
+
+
+def normalize_group_entry(raw: Any) -> dict[str, Any] | None:
+    """Normalize one entry of a group set's ``group_ids`` list.
+
+    A bare group number is stored as ``*:GroupMessage:<group>``, which matches
+    that group on every platform instance. A full ``unified_msg_origin`` such as
+    ``aiocqhttp:GroupMessage:123456`` binds the entry to one instance, which is
+    what a deployment running several QQ accounts needs.
+
+    Args:
+        raw: Raw list item.
+
+    Returns:
+        A dict with ``umo``, ``platform_id``, ``group_id`` and ``label``, or
+        ``None`` when the entry is unusable.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+
+    if ":" in text:
+        parts = [part.strip() for part in text.split(":")]
+        if len(parts) != 3 or not all(parts):
+            logger.warning(
+                f"[QQAdmin] 群号/UMO「{text}」格式不正确，已忽略。"
+                "可填写群号（如 123456）或会话 UMO（如 aiocqhttp:GroupMessage:123456）",
+            )
+            return None
+        platform_id, message_type, group_id = parts
+        if message_type != GROUP_MESSAGE_TYPE:
+            logger.warning(
+                f"[QQAdmin] 群号/UMO「{text}」不是群消息会话，已忽略",
+            )
+            return None
+        label = text
+    else:
+        if not text.isdigit():
+            logger.warning(
+                f"[QQAdmin] 群号「{text}」不是纯数字，已忽略。"
+                "同时接了多个 QQ 时请改填会话 UMO（如 aiocqhttp:GroupMessage:123456）",
+            )
+            return None
+        platform_id, group_id = ANY_PLATFORM, text
+        label = text
+
+    return {
+        "umo": f"{platform_id}:{GROUP_MESSAGE_TYPE}:{group_id}",
+        "platform_id": "" if platform_id == ANY_PLATFORM else platform_id,
+        "group_id": group_id,
+        "label": label,
+    }
+
+
+def group_umo(group_id: str, platform_id: str = "") -> str:
+    """Build the UMO of a group.
+
+    Args:
+        group_id: QQ group id.
+        platform_id: Platform instance id, empty for "any instance".
+
+    Returns:
+        The group's ``unified_msg_origin``.
+    """
+    return f"{platform_id or ANY_PLATFORM}:{GROUP_MESSAGE_TYPE}:{group_id}"
 
 
 def find_group_set(
     group_sets: list[dict[str, Any]],
-    group_id: str,
+    group_id: str = "",
+    *,
+    umo: str = "",
 ) -> dict[str, Any] | None:
-    """Find the group set owning ``group_id``.
+    """Find the group set owning a group.
+
+    The event's UMO is matched first, so a group bound to one platform instance
+    wins over an entry that accepts every instance. Without a UMO (a join
+    request being parsed, an exported blacklist, …) only the group id is known
+    and an instance-bound entry is still matched, because the id identifies the
+    group itself.
 
     Args:
         group_sets: Output of :func:`normalize_group_sets`.
-        group_id: QQ group id.
+        group_id: QQ group id. Derived from ``umo`` when omitted.
+        umo: ``unified_msg_origin`` of the group, when known.
 
     Returns:
         The owning group set, or ``None`` when the group belongs to no set.
     """
-    if not group_id:
+    target = str(group_id or "").strip()
+    origin = str(umo or "").strip()
+    if not target and origin:
+        parts = origin.split(":")
+        if len(parts) >= 3 and parts[1] == GROUP_MESSAGE_TYPE:
+            target = parts[2]
+    if not target:
         return None
+
+    exact = origin
+    fallback: dict[str, Any] | None = None
     for group_set in group_sets:
-        if group_id in group_set["group_ids"]:
-            return group_set
-    return None
+        for group in group_set["groups"]:
+            if group["group_id"] != target:
+                continue
+            if exact and group["umo"] == exact:
+                return group_set
+            if not group["platform_id"] and fallback is None:
+                fallback = group_set
+    return fallback
 
 
 def find_group_set_by_name(
@@ -659,20 +777,23 @@ def manage_group_sets(
 
 def group_settings(
     group_sets: list[dict[str, Any]],
-    group_id: str,
+    group_id: str = "",
+    *,
+    umo: str = "",
 ) -> dict[str, Any]:
     """Resolve the behaviour settings that apply to a group.
 
     Args:
         group_sets: Output of :func:`normalize_group_sets`.
         group_id: QQ group id.
+        umo: ``unified_msg_origin`` of the group, when known.
 
     Returns:
         The owning group set (which carries ``default_ban_duration`` and
         ``blacklist``), or :data:`DEFAULT_GROUP_SETTINGS` for groups outside
         every set. The mapping is read-only for callers.
     """
-    group_set = find_group_set(group_sets, group_id)
+    group_set = find_group_set(group_sets, group_id, umo=umo)
     return group_set if group_set else DEFAULT_GROUP_SETTINGS
 
 
@@ -693,7 +814,9 @@ def blacklist_scope(group_id: str) -> str:
 
 def resolve_blacklist_scope(
     group_sets: list[dict[str, Any]],
-    group_id: str,
+    group_id: str = "",
+    *,
+    umo: str = "",
 ) -> str:
     """Resolve the blacklist bucket a group reads from and writes to.
 
@@ -704,11 +827,12 @@ def resolve_blacklist_scope(
     Args:
         group_sets: Normalized group set definitions.
         group_id: QQ group id.
+        umo: ``unified_msg_origin`` of the group, when known.
 
     Returns:
         The bucket key; the group id itself when the group is unconfigured.
     """
-    group_set = find_group_set(group_sets, group_id)
+    group_set = find_group_set(group_sets, group_id, umo=umo)
     if group_set:
         return str(group_set["name"])
     return blacklist_scope(group_id)
