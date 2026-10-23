@@ -36,6 +36,9 @@ class BlacklistEntry:
         operator: QQ number of the person who added the entry.
         created_at: Unix timestamp of the addition.
         nickname: Best known display name at the time of addition.
+        group_id: Group the entry was added from. The bucket is shared by a
+            whole group set, so this is what tells an operator where the
+            blacklisting happened; it is informational only.
     """
 
     user_id: str
@@ -43,6 +46,7 @@ class BlacklistEntry:
     operator: str
     created_at: float
     nickname: str = ""
+    group_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the entry for storage.
@@ -55,6 +59,7 @@ class BlacklistEntry:
             "operator": self.operator,
             "created_at": self.created_at,
             "nickname": self.nickname,
+            "group_id": self.group_id,
         }
 
     @classmethod
@@ -76,6 +81,7 @@ class BlacklistEntry:
             operator=str(raw.get("operator") or ""),
             created_at=float(raw.get("created_at") or 0.0),
             nickname=str(raw.get("nickname") or ""),
+            group_id=str(raw.get("group_id") or ""),
         )
 
 
@@ -163,6 +169,14 @@ class BlacklistStore:
         entries.sort(key=lambda item: item.created_at)
         return entries
 
+    def scopes(self) -> list[str]:
+        """List the buckets that hold entries.
+
+        Returns:
+            Bucket keys in the order they were first written.
+        """
+        return [str(scope) for scope in self._store.data]
+
     def count(self, scope: str) -> int:
         """Count entries in a scope.
 
@@ -186,6 +200,7 @@ class BlacklistStore:
         reason: str,
         operator: str,
         nickname: str = "",
+        group_id: str = "",
     ) -> BlacklistEntry:
         """Add or replace an entry.
 
@@ -195,6 +210,7 @@ class BlacklistStore:
             reason: Mandatory justification, already defaulted by the caller.
             operator: QQ number of the operator.
             nickname: Display name to remember.
+            group_id: Group the blacklisting happened in.
 
         Returns:
             The stored entry.
@@ -205,6 +221,7 @@ class BlacklistStore:
             operator=str(operator),
             created_at=time.time(),
             nickname=str(nickname or ""),
+            group_id=str(group_id or ""),
         )
         self._bucket(scope)[str(user_id)] = entry.to_dict()
         self._store.save()

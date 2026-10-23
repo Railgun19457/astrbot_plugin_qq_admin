@@ -23,6 +23,21 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class MemberSheet:
+    """One group's roster inside an export.
+
+    Attributes:
+        group_id: Group the roster belongs to.
+        members: Raw member payloads from ``get_group_member_list``.
+        group_name: Group display name, used in the sheet title.
+    """
+
+    group_id: str
+    members: list[dict[str, Any]]
+    group_name: str = ""
+
+
+@dataclass
 class ExportResult:
     """Outcome of building an export file.
 
@@ -51,6 +66,14 @@ def _timestamp() -> str:
         A string such as ``20261002-181500``.
     """
     return time.strftime("%Y%m%d-%H%M%S")
+
+
+#: Columns of a group member roster.
+_MEMBER_HEADERS = ["QQ号", "群名片", "昵称", "群身份", "等级", "入群时间"]
+
+#: Columns of a blacklist sheet. ``拉黑所在群`` exists because the blacklist is
+#: shared by a whole group set: it records where the entry came from.
+_BLACKLIST_HEADERS = ["QQ号", "昵称", "拉黑原因", "拉黑所在群", "操作人", "拉黑时间"]
 
 
 def _autosize(worksheet: Any) -> None:
@@ -126,28 +149,36 @@ class Exporter:
 
     def export_members(
         self,
-        group_id: str,
-        members: list[dict[str, Any]],
+        sheets: list[MemberSheet],
         *,
-        group_name: str = "",
+        scope: str = "",
     ) -> ExportResult:
-        """Export a group member roster.
+        """Export one or more group rosters into a single workbook.
+
+        Every group gets its own worksheet, so a manage session can export all
+        of its groups at once without merging unrelated rosters into one table.
 
         Args:
-            group_id: Group the roster belongs to.
-            members: Raw member payloads from ``get_group_member_list``.
-            group_name: Group display name, used in the sheet title.
+            sheets: Rosters to export, in display order.
+            scope: Group set name the rosters belong to, used in the file name.
 
         Returns:
             The export outcome.
         """
-        truncated = len(members) > self._max_members
-        rows = members[: self._max_members]
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            return ExportResult(error="未安装 openpyxl，请先执行 pip install openpyxl")
 
-        headers = ["QQ号", "群名片", "昵称", "群身份", "等级", "入群时间"]
-        data: list[list[Any]] = []
-        for member in rows:
-            data.append(
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+        total = 0
+        truncated = False
+        for sheet in sheets:
+            clipped = len(sheet.members) > self._max_members
+            rows = sheet.members[: self._max_members]
+            truncated = truncated or clipped
+            data = [
                 [
                     str(member.get("user_id") or ""),
                     str(member.get("card") or ""),
@@ -155,120 +186,129 @@ class Exporter:
                     _role_label(str(member.get("role") or "")),
                     str(member.get("level") or ""),
                     _format_timestamp(member.get("join_time")),
-                ],
+                ]
+                for member in rows
+            ]
+            total += len(data)
+            self._fill_sheet(
+                workbook.create_sheet(_sheet_title(sheet)),
+                headers=_MEMBER_HEADERS,
+                rows=data,
+                heading=f"群成员名单 - {sheet.group_name or sheet.group_id}",
+                note=(
+                    f"共 {len(sheet.members)} 人，仅显示前 {self._max_members} 条"
+                    if clipped
+                    else f"共 {len(sheet.members)} 人"
+                ),
             )
 
-        title = f"群成员名单 - {group_name or group_id}"
-        return self._write(
-            sheet_title="群成员",
-            headers=headers,
-            rows=data,
-            filename=f"members-{group_id}-{_timestamp()}.xlsx",
-            heading=title,
+        safe_scope = _safe_name(scope)
+        return self._save(
+            workbook,
+            filename=f"members-{safe_scope}-{_timestamp()}.xlsx",
+            row_count=total,
             truncated=truncated,
-            note=(
-                f"共 {len(members)} 人，仅显示前 {self._max_members} 条"
-                if truncated
-                else f"共 {len(members)} 人"
-            ),
         )
 
     def export_blacklist(
         self,
-        scope: str,
         entries: list[BlacklistEntry],
         *,
-        group_ids: list[str] | None = None,
+        scope: str = "",
+        groups: str = "",
     ) -> ExportResult:
-        """Export the blacklist of a group set.
+        """Export every blacklist entry an operator can see.
 
         Args:
-            scope: Blacklist bucket name (usually the group set name).
             entries: Entries to export.
-            group_ids: Groups sharing this bucket, listed in the sheet note.
-
-        Returns:
-            The export outcome.
-        """
-        headers = ["QQ号", "昵称", "拉黑原因", "操作人", "拉黑时间"]
-        data: list[list[Any]] = []
-        for entry in entries:
-            data.append(
-                [
-                    entry.user_id,
-                    entry.nickname,
-                    entry.reason,
-                    entry.operator,
-                    _format_timestamp(entry.created_at),
-                ],
-            )
-
-        covered = f"，覆盖 {len(group_ids)} 个群" if group_ids else ""
-        # The scope is a user chosen group set name, so it cannot be copied
-        # into a file name verbatim: separators would escape the output
-        # directory and characters such as ``:`` are invalid on Windows.
-        safe_scope = re.sub(r"[^\w.-]", "_", str(scope)).strip("._")[:60] or "scope"
-        return self._write(
-            sheet_title="黑名单",
-            headers=headers,
-            rows=data,
-            filename=f"blacklist-{safe_scope}-{_timestamp()}.xlsx",
-            heading=f"黑名单 - {scope}",
-            note=f"共 {len(entries)} 人{covered}",
-        )
-
-    def _write(
-        self,
-        *,
-        sheet_title: str,
-        headers: list[str],
-        rows: list[list[Any]],
-        filename: str,
-        heading: str,
-        note: str,
-        truncated: bool = False,
-    ) -> ExportResult:
-        """Write a single-sheet workbook.
-
-        Args:
-            sheet_title: Worksheet name.
-            headers: Column headers.
-            rows: Data rows.
-            filename: File name to use.
-            heading: Merged title row content.
-            note: Subtitle describing the data set.
-            truncated: Whether ``max_members`` clipped the data set.
+            scope: Group set name, used in the file name.
+            groups: Human readable group list for the subtitle.
 
         Returns:
             The export outcome.
         """
         try:
             from openpyxl import Workbook
-            from openpyxl.styles import Alignment, Font
         except ImportError:
             return ExportResult(error="未安装 openpyxl，请先执行 pip install openpyxl")
 
+        data = [
+            [
+                entry.user_id,
+                entry.nickname,
+                entry.reason,
+                entry.group_id,
+                entry.operator,
+                _format_timestamp(entry.created_at),
+            ]
+            for entry in entries
+        ]
         workbook = Workbook()
-        worksheet = workbook.active
-        worksheet.title = sheet_title
+        self._fill_sheet(
+            workbook.active,
+            headers=_BLACKLIST_HEADERS,
+            rows=data,
+            heading=f"黑名单 - {scope or '全部'}",
+            note=f"共 {len(entries)} 人{groups}",
+        )
+        safe_scope = _safe_name(scope)
+        return self._save(
+            workbook,
+            filename=f"blacklist-{safe_scope}-{_timestamp()}.xlsx",
+            row_count=len(data),
+        )
 
-        # Title row, then a subtitle, then the header row.
+    @staticmethod
+    def _fill_sheet(
+        worksheet: Any,
+        *,
+        headers: list[str],
+        rows: list[list[Any]],
+        heading: str,
+        note: str,
+    ) -> None:
+        """Write a title, subtitle, header row and data into a worksheet.
+
+        Args:
+            worksheet: An openpyxl worksheet.
+            headers: Column headers.
+            rows: Data rows.
+            heading: Merged title row content.
+            note: Subtitle describing the data set.
+        """
+        from openpyxl.styles import Alignment, Font
+
         worksheet.append([heading])
-        first_column = worksheet.cell(row=1, column=1)
-        first_column.font = Font(bold=True, size=13)
-
+        worksheet.cell(row=1, column=1).font = Font(bold=True, size=13)
         worksheet.append([note])
         worksheet.append(headers)
-        header_row = worksheet[3]
-        for cell in header_row:
+        for cell in worksheet[3]:
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center")
-
         for row in rows:
             worksheet.append(row)
         worksheet.freeze_panes = "A4"
         _autosize(worksheet)
 
+    def _save(
+        self,
+        workbook: Any,
+        *,
+        filename: str,
+        row_count: int,
+        truncated: bool = False,
+    ) -> ExportResult:
+        """Write the workbook to disk.
+
+        Args:
+            workbook: An openpyxl workbook.
+            filename: File name to use.
+            row_count: Number of data rows written.
+            truncated: Whether ``max_members`` clipped the data set.
+
+        Returns:
+            The export outcome.
+        """
         self._output_dir.mkdir(parents=True, exist_ok=True)
         target = self._output_dir / filename
         try:
@@ -280,9 +320,41 @@ class Exporter:
         return ExportResult(
             path=str(target.resolve()),
             filename=filename,
-            row_count=len(rows),
+            row_count=row_count,
             truncated=truncated,
         )
+
+
+def _safe_name(text: str) -> str:
+    """Turn a user supplied name into a safe file name fragment.
+
+    A scope is a user chosen group set name, so it cannot be copied into a file
+    name verbatim: separators would escape the output directory and characters
+    such as ``:`` are invalid on Windows.
+
+    Args:
+        text: Raw name.
+
+    Returns:
+        A sanitized fragment, or ``all`` when nothing usable is left.
+    """
+    return re.sub(r"[^\w.-]", "_", str(text)).strip("._")[:60] or "all"
+
+
+def _sheet_title(sheet: MemberSheet) -> str:
+    """Build a worksheet title for a group roster.
+
+    Excel rejects sheet titles longer than 31 characters and the characters
+    ``[]:*?/\\``, so the group id is kept and the name is trimmed around it.
+
+    Args:
+        sheet: Roster to title.
+
+    Returns:
+        A worksheet title.
+    """
+    raw = f"{sheet.group_id} {sheet.group_name}".strip() or "群成员"
+    return re.sub(r"[\[\]:*?/\\]", "_", raw)[:31]
 
 
 def _role_label(role: str) -> str:

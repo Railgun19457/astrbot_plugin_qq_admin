@@ -30,9 +30,11 @@ DEFAULT_TEMPLATES: dict[str, str] = {
         "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：禁言 #123456 @某人；可用：{groups}"
     ),
     "blacklist_added": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}",
+    "blacklist_scopes": "生效群组：{scopes}",
     "blacklist_removed": "已将 {target_name}({target_id}) 移出黑名单",
     "blacklist_not_found": "{target_name}({target_id}) 不在黑名单中",
     "blacklist_disabled": "黑名单功能已在插件配置中关闭",
+    "blacklist_disabled_full": "黑名单（{scope}）：已在插件配置中关闭",
     "blacklist_empty": "黑名单（{scope}）当前为空",
     "blacklist_header": "黑名单（{scope}）共 {count} 人，覆盖 {groups} 个群",
     "api_failed": "操作失败：{error}",
@@ -51,9 +53,6 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "review_pending_hint": "引用本条消息回复「同意」或「拒绝」即可处理",
     "review_reply_ambiguous": (
         "当前有 {count} 条待处理申请，请引用对应的通知消息后再回复同意/拒绝"
-    ),
-    "manage_ambiguous": (
-        "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"
     ),
     "group_not_found": "未找到群组：{selector}",
     "member_list_failed": "无法获取群成员列表，请稍后重试",

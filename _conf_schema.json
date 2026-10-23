@@ -390,7 +390,7 @@
       "max_members": {
         "type": "int",
         "description": "成员名单导出行数上限",
-        "hint": "群成员很多时导出会很慢且文件很大，超出部分会被截断并在表格中标注",
+        "hint": "每个群的成员导出上限，超出部分会被截断并在表格中标注",
         "default": 3000
       },
       "cleanup_hours": {
@@ -400,7 +400,7 @@
         "default": 24
       }
     },
-    "hint": "生成 xlsx 表格并上传到群文件；本地文件按保存时长自动清理"
+    "hint": "导出当前会话能看到的全部内容：群里导出本群（黑名单为整个群组），管理会话里导出它管理的所有群；成员名单按群分表放在同一个文件里"
   },
   "notify": {
     "type": "object",
@@ -535,7 +535,7 @@
       "blacklist_empty": {
         "type": "text",
         "description": "黑名单为空",
-        "hint": "可用占位符：{scope}",
+        "hint": "群组没有黑名单条目时显示；可用占位符：{scope}",
         "default": "黑名单（{scope}）当前为空"
       },
       "blacklist_disabled": {
@@ -605,12 +605,6 @@
         "hint": "贴在「保持待审」的通知末尾，提示引用该消息回复",
         "default": "引用本条消息回复「同意」或「拒绝」即可处理"
       },
-      "manage_ambiguous": {
-        "type": "text",
-        "description": "管理会话对应多个群组",
-        "hint": "可用占位符：{names}",
-        "default": "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"
-      },
       "group_not_found": {
         "type": "text",
         "description": "找不到指定群组",
@@ -626,7 +620,7 @@
       "export_success": {
         "type": "text",
         "description": "导出并上传成功",
-        "hint": "可用占位符：{kind} {count}",
+        "hint": "可用占位符：{kind} {count}；成员名单会按群分表",
         "default": "已导出{kind}表格（{count} 条）并上传到群文件"
       },
       "export_local_only": {
@@ -670,6 +664,18 @@
         "description": "拉黑自动踢出失败",
         "hint": "可用占位符：{group}",
         "default": "未能将目标移出群 {group}"
+      },
+      "blacklist_disabled_full": {
+        "type": "text",
+        "description": "群组黑名单已关闭",
+        "hint": "在管理会话里逐个群组汇报时使用；可用占位符：{scope}",
+        "default": "黑名单（{scope}）：已在插件配置中关闭"
+      },
+      "blacklist_scopes": {
+        "type": "text",
+        "description": "拉黑生效范围",
+        "hint": "管理会话同时管理多个群组时追加的一行；可用占位符：{scopes}",
+        "default": "生效群组：{scopes}"
       }
     }
   }

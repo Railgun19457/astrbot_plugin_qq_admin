@@ -650,6 +650,7 @@ class QqBlacklistAddTool(_PluginTool):
             reason=final_reason,
             operator=str(event.get_sender_id() or ""),
             nickname=name,
+            group_id=group_id,
         )
 
         plugin._tool_audit(

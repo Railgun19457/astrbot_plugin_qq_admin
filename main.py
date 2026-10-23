@@ -55,7 +55,7 @@ from .core.config import (
     review_keywords,
 )
 from .core.confirm import ConfirmManager, PendingAction
-from .core.export import Exporter, to_file_uri
+from .core.export import Exporter, MemberSheet, to_file_uri
 from .core.filters import mentioned_command
 from .core.messages import render_template
 from .core.notify import Notifier, parse_manage_session
@@ -644,49 +644,49 @@ class QQAdminPlugin(Star):
             str(event.unified_msg_origin or ""),
         )
 
-    def _select_group_set(
-        self,
-        event: AstrMessageEvent,
-        selector: str = "",
-    ) -> tuple[dict[str, Any] | None, str]:
-        """Resolve which group set a blacklist command applies to.
+    def _visible_group_sets(self, event: AstrMessageEvent) -> list[dict[str, Any]]:
+        """List the group sets a session may inspect.
 
-        Inside a managed group the owning set is implicit. In a manage session
-        the set that declared it is used, and an explicit selector (group id or
-        group set name) picks one when several sets share the session.
+        Inside a managed group that is its own set; in a manage session it is
+        every set that declared the session, so a shared resource such as the
+        blacklist can be shown and exported in full without naming a group.
 
         Args:
             event: Event of the command.
-            selector: Optional group id or group set name from the arguments.
 
         Returns:
-            ``(group_set, error)``; ``error`` is a user-facing message when the
-            selector is unknown or the manage session is ambiguous.
+            The relevant group sets, in configuration order.
         """
-        text = str(selector or "").strip()
-        if text:
-            target = (
-                find_group_set(self.group_sets, text)
-                or find_group_set(self.group_sets, umo=text)
-                or find_group_set_by_name(self.group_sets, text)
-            )
-            if target is None:
-                return None, self._text("group_not_found", selector=text)
-            return target, ""
-
         group_set = self._group_set_for(event)
         if group_set is not None:
-            return group_set, ""
+            return [group_set]
+        return self._manage_sets(event)
 
-        bound = self._manage_sets(event)
-        if len(bound) == 1:
-            return bound[0], ""
-        if not bound:
-            return None, ""
-        return None, self._text(
-            "manage_ambiguous",
-            names="、".join(str(item["name"]) for item in bound),
-        )
+    def _upload_target(
+        self,
+        event: AstrMessageEvent,
+        group_ids: list[str],
+    ) -> str:
+        """Resolve the group whose file list should receive an export.
+
+        An export may cover several groups, but a file is uploaded to exactly
+        one group's file list: the one the operator is talking in when the
+        session is a group chat, otherwise the only group involved.
+
+        Args:
+            event: Event of the command.
+            group_ids: Groups covered by the export.
+
+        Returns:
+            The target group id, or an empty string when there is no sensible
+            target (the caller then returns the local path instead).
+        """
+        own_group = str(event.get_group_id() or "")
+        if own_group:
+            return own_group
+        if len(group_ids) == 1:
+            return group_ids[0]
+        return ""
 
     def _text(self, key: str, **values: Any) -> str:
         """Render a template with this plugin's configuration.
@@ -1554,15 +1554,15 @@ class QQAdminPlugin(Star):
             "【黑名单】组内所有群共享，拉黑后永久有效",
             f"  {prefix}拉黑 @某人 [原因]     原因会记入导出表格",
             f"  {prefix}解除拉黑 @某人",
-            f"  {prefix}黑名单 [群号或群组名] 查看名单与原因",
+            f"  {prefix}黑名单                 查看本群组名单（含拉黑所在群）",
             "",
-            "【导出】生成 xlsx 并上传群文件",
+            "【导出】生成 xlsx 并上传群文件；管理会话里一次导出全部群，成员按群分表",
             f"  {prefix}导出 成员 ｜ {prefix}导出 黑名单",
             "",
             "【状态】",
             f"  {prefix}群管状态             运行状态、群组归属与通知路由",
             f"  {prefix}群管                 本帮助",
-            f"  {prefix}黑名单 通知设置 [群号或群组名]  单独查看某群组的通知路由",
+            f"  {prefix}黑名单 设置            查看本群组（或管理会话下全部群组）的通知路由",
             "",
             "目标写法：@某人 ｜ 引用对方消息 ｜ 直接填写 QQ 号，三种等价且可混用。",
             "进群申请需要人工确认时：引用通知消息回复「同意」或「拒绝」即可处理。",
@@ -1880,16 +1880,15 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        # In a manage session the owning group set is selected for us; inside a
-        # managed group it is the one the command was issued in.
-        group_set, error = self._select_group_set(event)
-        if error:
-            async for item in self._reply(event, error):
-                yield item
-            return
-
-        blacklist_policy = self._policy(group_id, group_set)["blacklist"]
-        if not blacklist_policy["enabled"]:
+        # The blacklist is shared by a group set, so the command applies to
+        # every set this session can see: its own group, or all the sets a
+        # manage session controls. No group parameter is needed.
+        group_sets = [
+            item
+            for item in self._visible_group_sets(event)
+            if item["blacklist"]["enabled"]
+        ]
+        if not group_sets:
             # ``add`` cannot persist anything while the feature is off, so
             # reporting success here would be a lie.
             async for item in self._reply(event, self._text("blacklist_disabled")):
@@ -1904,7 +1903,7 @@ class QQAdminPlugin(Star):
         if parsed.unknown_duration:
             async for item in self._reply(
                 event,
-                self._text("usage", usage="拉黑 [#群号] @某人 [原因]"),
+                self._text("usage", usage="拉黑 @某人 [原因]"),
             ):
                 yield item
             return
@@ -1913,20 +1912,29 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        reason = parsed.reason or blacklist_policy["default_reason"]
-        scope = self._scope(group_id, group_set)
-        kick_mode = str(blacklist_policy["kick_on_add"] or "none")
+        reason = parsed.reason or group_sets[0]["blacklist"]["default_reason"]
 
         lines: list[str] = []
         for user_id in parsed.targets:
             nickname = await self._resolve_member_name(event, group_id, user_id)
-            self.blacklist.add(
-                scope,
-                user_id,
-                reason=reason,
-                operator=operator.user_id,
-                nickname=nickname,
-            )
+            for group_set in group_sets:
+                scope = str(group_set["name"])
+                self.blacklist.add(
+                    scope,
+                    user_id,
+                    reason=reason,
+                    operator=operator.user_id,
+                    nickname=nickname,
+                    group_id=group_id,
+                )
+                self._log_action(
+                    "blacklist_add",
+                    operator,
+                    target=user_id,
+                    group_id=group_id,
+                    scope=scope,
+                    reason=reason,
+                )
             lines.append(
                 self._text(
                     "blacklist_added",
@@ -1935,26 +1943,26 @@ class QQAdminPlugin(Star):
                     reason=reason,
                 ),
             )
-            self._log_action(
-                "blacklist_add",
-                operator,
-                target=user_id,
-                group_id=group_id,
-                scope=scope,
-                reason=reason,
-            )
-            lines.extend(
-                await self._auto_kick_after_blacklist(
-                    event,
-                    group_set=group_set,
-                    group_id=group_id,
-                    user_id=user_id,
-                    nickname=nickname,
-                    reason=reason,
-                    mode=kick_mode,
-                    operator=operator.user_id,
-                ),
-            )
+            if len(group_sets) > 1:
+                lines.append(
+                    self._text(
+                        "blacklist_scopes",
+                        scopes="、".join(str(item["name"]) for item in group_sets),
+                    ),
+                )
+            for group_set in group_sets:
+                lines.extend(
+                    await self._auto_kick_after_blacklist(
+                        event,
+                        group_set=group_set,
+                        group_id=group_id,
+                        user_id=user_id,
+                        nickname=nickname,
+                        reason=reason,
+                        mode=str(group_set["blacklist"]["kick_on_add"] or "none"),
+                        operator=operator.user_id,
+                    ),
+                )
 
         async for item in self._reply(
             event,
@@ -1997,9 +2005,12 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        group_set, error = self._select_group_set(event)
-        if error:
-            async for item in self._reply(event, error):
+        group_sets = self._visible_group_sets(event)
+        if not group_sets:
+            async for item in self._reply(
+                event,
+                self._text("group_not_found", selector="当前会话"),
+            ):
                 yield item
             return
 
@@ -2012,33 +2023,28 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        scope = self._scope(group_id, group_set)
         lines: list[str] = []
         for user_id in parsed.targets:
             name = await self._resolve_member_name(event, group_id, user_id)
-            if self.blacklist.remove(scope, user_id):
-                lines.append(
-                    self._text(
-                        "blacklist_removed",
-                        target_name=name,
-                        target_id=user_id,
-                    ),
-                )
-                self._log_action(
-                    "blacklist_remove",
-                    operator,
-                    target=user_id,
-                    group_id=group_id,
-                    scope=scope,
-                )
-            else:
-                lines.append(
-                    self._text(
-                        "blacklist_not_found",
-                        target_name=name,
-                        target_id=user_id,
-                    ),
-                )
+            removed = False
+            for group_set in group_sets:
+                scope = str(group_set["name"])
+                if self.blacklist.remove(scope, user_id):
+                    removed = True
+                    self._log_action(
+                        "blacklist_remove",
+                        operator,
+                        target=user_id,
+                        group_id=group_id,
+                        scope=scope,
+                    )
+            lines.append(
+                self._text(
+                    "blacklist_removed" if removed else "blacklist_not_found",
+                    target_name=name,
+                    target_id=user_id,
+                ),
+            )
 
         async for item in self._reply(
             event,
@@ -2059,13 +2065,15 @@ class QQAdminPlugin(Star):
     ) -> AsyncGenerator[Any, None]:
         """查看群组共享的黑名单。
 
+        黑名单是整个群组共用的，因此不需要指定群号：在群里查看即本群组
+        的名单，在管理会话里则列出该会话管理的全部群组。
+
         Args:
             event: 消息事件。
-            args: 可选的群号或群组名；在管理会话里对应多个群组时必须填写。
+            args: 「设置」查看通知路由；其余参数忽略。允许省略。
         """
         if await self._should_skip(event):
             return
-        group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
 
         allowed, deny_reason = check_capability(
@@ -2083,65 +2091,78 @@ class QQAdminPlugin(Star):
 
         arg = str(args or "").strip()
         if arg in ("设置", "通知设置", "settings"):
-            group_set, error = self._select_group_set(event)
-            if error:
-                async for item in self._reply(event, error):
-                    yield item
-                return
-            if group_set is None:
+            group_sets = self._visible_group_sets(event)
+            if not group_sets:
                 async for item in self._reply(
                     event,
-                    self._text("group_not_found", selector=group_id),
+                    self._text("group_not_found", selector="当前会话"),
                 ):
                     yield item
                 return
+            lines: list[str] = []
+            for group_set in group_sets:
+                if len(group_sets) > 1:
+                    lines.append(f"【{group_set['name']}】")
+                lines.extend(self._notify_route_lines(str(group_set["name"])))
+            async for item in self._reply(event, "\n".join(lines)):
+                yield item
+            return
+
+        group_sets = self._visible_group_sets(event)
+        if not group_sets:
             async for item in self._reply(
                 event,
-                "\n".join(self._notify_route_lines(str(group_set["name"]))),
+                self._text("group_not_found", selector="当前会话"),
             ):
                 yield item
             return
 
-        group_set, error = self._select_group_set(event, arg)
-        if error:
-            async for item in self._reply(event, error):
-                yield item
-            return
-        if group_set is None:
-            async for item in self._reply(
-                event,
-                self._text("group_not_found", selector=group_id),
-            ):
-                yield item
-            return
-
-        if not self._policy(group_id, group_set)["blacklist"]["enabled"]:
-            async for item in self._reply(event, self._text("blacklist_disabled")):
-                yield item
-            return
-
-        scope = self._scope(group_id, group_set)
-        entries = self.blacklist.list_entries(scope)
-        if not entries:
-            async for item in self._reply(
-                event,
-                self._text("blacklist_empty", scope=scope),
-            ):
-                yield item
-            return
-
-        header = self._text(
-            "blacklist_header",
-            scope=scope,
-            count=len(entries),
-            groups=len(group_set["group_ids"]) or 1,
-        )
-        lines = [header]
-        for index, entry in enumerate(entries, start=1):
-            name = entry.nickname or entry.user_id
-            lines.append(f"{index}. {name}({entry.user_id}) · {entry.reason}")
+        lines = []
+        for group_set in group_sets:
+            scope = str(group_set["name"])
+            enabled = bool(group_set["blacklist"]["enabled"])
+            if not enabled:
+                lines.append(
+                    self._text("blacklist_disabled_full", scope=scope),
+                )
+                continue
+            entries = self.blacklist.list_entries(scope)
+            if not entries:
+                lines.append(self._text("blacklist_empty", scope=scope))
+                continue
+            lines.extend(self._blacklist_lines(scope, group_set, entries))
         async for item in self._reply(event, "\n".join(lines)):
             yield item
+
+    def _blacklist_lines(
+        self,
+        scope: str,
+        group_set: dict[str, Any],
+        entries: list[Any],
+    ) -> list[str]:
+        """Render one blacklist bucket.
+
+        Args:
+            scope: Bucket name (the group set name).
+            group_set: Owning group set.
+            entries: Entries to render.
+
+        Returns:
+            The header line followed by one line per entry.
+        """
+        lines = [
+            self._text(
+                "blacklist_header",
+                scope=scope,
+                count=len(entries),
+                groups=len(group_set["group_ids"]) or 1,
+            ),
+        ]
+        for index, entry in enumerate(entries, start=1):
+            name = entry.nickname or entry.user_id
+            source = f"（{entry.group_id} 拉黑）" if entry.group_id else ""
+            lines.append(f"{index}. {name}({entry.user_id}) · {entry.reason}{source}")
+        return lines
 
     # ------------------------------------------------------------------ #
     #  Internal helpers
@@ -2935,18 +2956,14 @@ class QQAdminPlugin(Star):
     ) -> AsyncGenerator[Any, None]:
         """导出群成员名单或黑名单表格并上传到群文件。
 
+        导出的是当前会话能看到的全部内容：群里即本群（黑名单为整个群组），
+        管理会话里则是它所管理的所有群。
+
         Args:
             event: 消息事件。
-            args: 「成员」或「黑名单」；在管理会话里可用「#群号」指定
-                目标群。允许省略。
+            args: 「成员」或「黑名单」。允许省略。
         """
         if await self._should_skip(event):
-            return
-        selector, rest = split_group_selector(str(args or "").split())
-        group_id, error = self._action_group(event, selector)
-        if error:
-            async for item in self._reply(event, error):
-                yield item
             return
         operator = await self._permission_context(event)
 
@@ -2963,22 +2980,31 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        kind = " ".join(rest).strip() or "成员"
+        kind = str(args or "").strip() or "成员"
         if kind not in ("成员", "黑名单", "members", "blacklist"):
             async for item in self._reply(
                 event,
-                self._text("usage", usage="导出 [#群号] 成员 / 黑名单"),
+                self._text("usage", usage="导出 成员 / 黑名单"),
             ):
                 yield item
             return
 
-        group_set = self._group_set_for(event) or find_group_set(
-            self.group_sets,
-            group_id,
-        )
+        group_sets = self._visible_group_sets(event)
+        if not group_sets:
+            async for item in self._reply(
+                event,
+                self._text("group_not_found", selector="当前会话"),
+            ):
+                yield item
+            return
+
+        names = "、".join(str(item["name"]) for item in group_sets)
         if kind in ("黑名单", "blacklist"):
-            scope = self._scope(group_id, group_set)
-            entries = self.blacklist.list_entries(scope)
+            entries = [
+                entry
+                for group_set in group_sets
+                for entry in self.blacklist.list_entries(str(group_set["name"]))
+            ]
             if not entries:
                 async for item in self._reply(
                     event,
@@ -2987,29 +3013,43 @@ class QQAdminPlugin(Star):
                     yield item
                 return
             result = self.exporter.export_blacklist(
-                scope,
                 entries,
-                group_ids=list(group_set["group_ids"]) if group_set else [group_id],
+                scope=names,
+                groups=f"，来自 {len(group_sets)} 个群组",
             )
+            group_ids = [
+                group_id for item in group_sets for group_id in item["group_ids"]
+            ]
         else:
-            info = await self.client.get_group_info(event, group_id)
-            members = await self.client.get_group_member_list(
-                event,
-                group_id,
-                use_cache=False,
-            )
-            if not members:
+            sheets = []
+            group_ids = []
+            for group_set in group_sets:
+                for group in group_set["groups"]:
+                    group_id = str(group["group_id"])
+                    group_ids.append(group_id)
+                    info = await self.client.get_group_info(event, group_id)
+                    members = await self.client.get_group_member_list(
+                        event,
+                        group_id,
+                        use_cache=False,
+                    )
+                    if not members:
+                        continue
+                    sheets.append(
+                        MemberSheet(
+                            group_id=group_id,
+                            members=members,
+                            group_name=str((info or {}).get("group_name") or ""),
+                        ),
+                    )
+            if not sheets:
                 async for item in self._reply(
                     event,
                     self._text("member_list_failed"),
                 ):
                     yield item
                 return
-            result = self.exporter.export_members(
-                group_id,
-                members,
-                group_name=str((info or {}).get("group_name") or ""),
-            )
+            result = self.exporter.export_members(sheets, scope=names)
 
         if not result:
             async for item in self._reply(
@@ -3017,24 +3057,26 @@ class QQAdminPlugin(Star):
                 self._text("export_failed", error=result.error),
                 receipt=True,
                 category=NOTIFY_CATEGORY_EXPORT,
-                group_id=group_id,
+                group_id=str(event.get_group_id() or ""),
             ):
                 yield item
             return
 
+        upload_group = self._upload_target(event, group_ids)
         self._log_action(
             "export",
             operator,
-            group_id=group_id,
+            group_id=upload_group,
             kind=kind,
+            groups=len(group_ids),
             rows=result.row_count,
         )
 
         uploaded = False
-        if self._export_upload:
+        if self._export_upload and upload_group:
             upload = await self.client.upload_group_file(
                 event,
-                group_id,
+                upload_group,
                 to_file_uri(result.path),
                 result.filename,
             )
@@ -3062,7 +3104,7 @@ class QQAdminPlugin(Star):
             text,
             receipt=True,
             category=NOTIFY_CATEGORY_EXPORT,
-            group_id=group_id,
+            group_id=upload_group or str(event.get_group_id() or ""),
         ):
             yield item
 
