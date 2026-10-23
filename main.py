@@ -1539,7 +1539,6 @@ class QQAdminPlugin(Star):
         prefix = self._command_prefix()
         lines = [
             "QQ群管 · 指令一览",
-            f"指令前缀跟随 AstrBot 的唤醒前缀（当前 {prefix}），也可以 @机器人 或引用机器人消息后直接发指令名。",
             "",
             "【禁言】",
             f"  {prefix}禁言 @某人 [时长]    不带时长用群组默认值，可写 10m / 2h / 1d / 600",
