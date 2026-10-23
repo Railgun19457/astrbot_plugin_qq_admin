@@ -2839,36 +2839,70 @@ class QQAdminPlugin(Star):
     #  Helpers shared with the LLM tools
     # ------------------------------------------------------------------ #
 
-    def _tool_group_id(self, event: AstrMessageEvent) -> str:
-        """Resolve the group a tool call operates on.
+    def _tool_group_scope(self, event: AstrMessageEvent) -> list[str]:
+        """List the groups a tool call may act on.
 
-        The group id is never a tool parameter; it always comes from the event,
-        or from a management session that controls exactly one group, so a
-        model cannot be steered into touching another group.
+        Inside a managed group the group itself is always reachable. A manage
+        session additionally reaches every group of the sets that declared it,
+        because the console is not bound to one group.
 
         Args:
             event: The tool call event.
 
         Returns:
-            The group id, or an empty string when unavailable or when the group
-            is not part of any configured group set.
+            Group ids the session is allowed to manage, de-duplicated and in
+            configuration order. Empty when the session manages nothing.
         """
         if not self.enabled:
-            return ""
+            return []
         if event.get_platform_name() != SUPPORTED_PLATFORM:
-            return ""
-        group_id = str(event.get_group_id() or "")
-        if self._group_set_for(event) is not None:
-            return group_id
+            return []
 
-        managed_group_ids = {
-            group_id
-            for group_set in self._manage_sets(event)
-            for group_id in group_set["group_ids"]
-        }
-        if len(managed_group_ids) == 1:
-            return next(iter(managed_group_ids))
-        return ""
+        scope: list[str] = []
+        for group_set in self._manage_sets(event):
+            for group_id in group_set["group_ids"]:
+                if group_id not in scope:
+                    scope.append(group_id)
+
+        current_group = str(event.get_group_id() or "")
+        if (
+            current_group
+            and self._group_set_for(event) is not None
+            and current_group not in scope
+        ):
+            scope.append(current_group)
+        return scope
+
+    def _tool_group_id(
+        self,
+        event: AstrMessageEvent,
+        selector: str = "",
+    ) -> str:
+        """Resolve the group a tool call operates on.
+
+        Inside a managed group that is the current group. A manage session has
+        no group of its own, so the target comes from the model supplied
+        ``selector``; it is only accepted when it names one of the groups the
+        session manages, so a model steered by a crafted message still cannot
+        reach another group. The selector may be omitted inside a managed group
+        (the current group is used) or when the session reaches exactly one
+        group.
+
+        Args:
+            event: The tool call event.
+            selector: Group number supplied by the model, possibly empty.
+
+        Returns:
+            The group id, or an empty string when it cannot be resolved within
+            the session's scope.
+        """
+        scope = self._tool_group_scope(event)
+        text = str(selector or "").strip().lstrip("#")
+        if text:
+            return text if text in scope else ""
+        if self._group_set_for(event) is not None:
+            return str(event.get_group_id() or "")
+        return scope[0] if len(scope) == 1 else ""
 
     def _extract_targets(self, event: AstrMessageEvent) -> list[str]:
         """Extract ``@`` targets from an event.

@@ -4,9 +4,11 @@ Security model
 --------------
 Two rules shape every tool here:
 
-1. **The group id is never a tool parameter.** It is always derived from
-   ``event.get_group_id()``, so a model steered by a crafted message cannot
-   reach into a different group.
+1. **The chat a tool acts on comes from the session, not from the model.**
+   Inside a group that is always the current group. A manage session may name
+   one of its own groups through the ``group_id`` parameter, and the value is
+   rejected unless it is part of that session's scope, so a model steered by a
+   crafted message cannot reach into a different group.
 2. **Tool-level permission checks are mandatory.** AstrBot's
    ``FunctionToolManager._default_permission`` returns ``"member"`` for every
    non-builtin tool, i.e. the framework gate does not restrict these tools at
@@ -79,12 +81,24 @@ def _failed(plugin: QQAdminPlugin, error: str, *, unsupported: bool = False) -> 
     return "error: " + render_template(plugin.templates, "api_failed", error=error)
 
 
-def _no_group() -> str:
-    """Message returned when a tool is called outside a configured group.
+def _no_group(plugin: QQAdminPlugin, event: AstrMessageEvent) -> str:
+    """Message returned when a tool cannot resolve a target group.
+
+    The refusal names the groups the session may act on, so the model can retry
+    with an explicit ``group_id`` instead of guessing.
+
+    Args:
+        plugin: Plugin instance supplying the session scope.
+        event: The tool call event.
 
     Returns:
         The refusal text.
     """
+    scope = plugin._tool_group_scope(event)
+    if len(scope) > 1:
+        return "error: 当前会话对应多个群，请在 group_id 中指定其中一个：" + "、".join(
+            scope
+        )
     return "error: 当前会话不在已配置的群组中"
 
 
@@ -192,6 +206,10 @@ class QqBanMemberTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "user_id": {
                     "type": "string",
                     "description": "目标成员的 QQ 号，可省略（省略时使用 @ 或回复对象）",
@@ -210,6 +228,7 @@ class QqBanMemberTool(_PluginTool):
         event: AstrMessageEvent,
         duration_seconds: int,
         user_id: str = "",
+        group_id: str = "",
     ) -> str:
         """Execute the mute.
 
@@ -217,14 +236,16 @@ class QqBanMemberTool(_PluginTool):
             event: The tool call event.
             duration_seconds: Mute duration; ``0`` lifts an existing mute.
             user_id: Target QQ number, optional.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         capability = "ban"
         allowed, deny = await plugin._tool_permission(event, capability)
@@ -291,6 +312,10 @@ class QqWholeBanTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "enabled": {"type": "boolean", "description": "true 开启，false 解除"},
                 "duration_seconds": {
                     "type": "integer",
@@ -312,6 +337,7 @@ class QqWholeBanTool(_PluginTool):
         enabled: bool,
         duration_seconds: int = 0,
         confirm: bool = False,
+        group_id: str = "",
     ) -> str:
         """Execute the toggle.
 
@@ -321,14 +347,16 @@ class QqWholeBanTool(_PluginTool):
             duration_seconds: When enabling, seconds until the mute is lifted
                 automatically; ``0`` keeps it until lifted manually.
             confirm: Must be ``True`` to actually act.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "whole_ban")
         if not allowed:
@@ -398,6 +426,10 @@ class QqKickMemberTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
                 "reject_add": {
                     "type": "boolean",
@@ -418,6 +450,7 @@ class QqKickMemberTool(_PluginTool):
         user_id: str = "",
         reject_add: bool = False,
         confirm: bool = False,
+        group_id: str = "",
     ) -> str:
         """Execute the kick.
 
@@ -426,14 +459,16 @@ class QqKickMemberTool(_PluginTool):
             user_id: Target QQ number, optional.
             reject_add: Also reject future join requests.
             confirm: Must be ``True`` to actually act.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "kick")
         if not allowed:
@@ -495,6 +530,10 @@ class QqSendGroupNoticeTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "content": {"type": "string", "description": "公告正文"},
                 "image": {
                     "type": "string",
@@ -515,6 +554,7 @@ class QqSendGroupNoticeTool(_PluginTool):
         content: str,
         image: str = "",
         confirm: bool = False,
+        group_id: str = "",
     ) -> str:
         """Execute the announcement.
 
@@ -523,14 +563,16 @@ class QqSendGroupNoticeTool(_PluginTool):
             content: Notice body.
             image: Optional image path or URL.
             confirm: Must be ``True`` to actually publish.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
         if not str(content or "").strip():
             return "error: 公告内容不能为空"
 
@@ -582,24 +624,35 @@ class QqGroupNoticeQueryTool(_PluginTool):
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
+            },
             "required": [],
         },
     )
 
-    async def run(self, event: AstrMessageEvent) -> str:
+    async def run(
+        self,
+        event: AstrMessageEvent,
+        group_id: str = "",
+    ) -> str:
         """Execute the lookup.
 
         Args:
             event: The tool call event.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "notice")
         if not allowed:
@@ -638,6 +691,10 @@ class QqGroupNoticeDeleteTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "notice_id": {"type": "string", "description": "公告编号"},
                 "confirm": {
                     "type": "boolean",
@@ -653,6 +710,7 @@ class QqGroupNoticeDeleteTool(_PluginTool):
         event: AstrMessageEvent,
         notice_id: str,
         confirm: bool = False,
+        group_id: str = "",
     ) -> str:
         """Execute the deletion.
 
@@ -660,14 +718,16 @@ class QqGroupNoticeDeleteTool(_PluginTool):
             event: The tool call event.
             notice_id: Identifier from :class:`QqGroupNoticeQueryTool`.
             confirm: Must be ``True`` to actually delete.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
         target = str(notice_id or "").strip()
         if not target:
             return "error: 缺少 notice_id"
@@ -716,6 +776,10 @@ class QqBlacklistAddTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "reason": {"type": "string", "description": "拉黑原因，必填"},
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
             },
@@ -728,6 +792,7 @@ class QqBlacklistAddTool(_PluginTool):
         event: AstrMessageEvent,
         reason: str,
         user_id: str = "",
+        group_id: str = "",
     ) -> str:
         """Execute the blacklisting.
 
@@ -735,14 +800,16 @@ class QqBlacklistAddTool(_PluginTool):
             event: The tool call event.
             reason: Why the user is blacklisted.
             user_id: Target QQ number, optional.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "blacklist")
         if not allowed:
@@ -796,26 +863,37 @@ class QqBlacklistRemoveTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
             },
             "required": [],
         },
     )
 
-    async def run(self, event: AstrMessageEvent, user_id: str = "") -> str:
+    async def run(
+        self,
+        event: AstrMessageEvent,
+        user_id: str = "",
+        group_id: str = "",
+    ) -> str:
         """Execute the removal.
 
         Args:
             event: The tool call event.
             user_id: Target QQ number, optional.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "blacklist")
         if not allowed:
@@ -859,24 +937,35 @@ class QqBlacklistQueryTool(_PluginTool):
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
+            },
             "required": [],
         },
     )
 
-    async def run(self, event: AstrMessageEvent) -> str:
+    async def run(
+        self,
+        event: AstrMessageEvent,
+        group_id: str = "",
+    ) -> str:
         """Return the blacklist as plain text.
 
         Args:
             event: The tool call event.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             The formatted list or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "query")
         if not allowed:
@@ -907,24 +996,35 @@ class QqGroupInfoTool(_PluginTool):
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
+            },
             "required": [],
         },
     )
 
-    async def run(self, event: AstrMessageEvent) -> str:
+    async def run(
+        self,
+        event: AstrMessageEvent,
+        group_id: str = "",
+    ) -> str:
         """Return group information.
 
         Args:
             event: The tool call event.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             The formatted information or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "query")
         if not allowed:
@@ -961,6 +1061,10 @@ class QqMemberListTool(_PluginTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
+                "group_id": {
+                    "type": "string",
+                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                },
                 "limit": {
                     "type": "integer",
                     "description": "最多返回多少条，默认 50，上限 200",
@@ -970,20 +1074,27 @@ class QqMemberListTool(_PluginTool):
         },
     )
 
-    async def run(self, event: AstrMessageEvent, limit: int = 50) -> str:
+    async def run(
+        self,
+        event: AstrMessageEvent,
+        limit: int = 50,
+        group_id: str = "",
+    ) -> str:
         """Return a member listing.
 
         Args:
             event: The tool call event.
             limit: Maximum number of members to include.
+            group_id: Target group number, needed only in a manage session
+                that corresponds to several groups.
 
         Returns:
             The formatted listing or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event)
+        group_id = plugin._tool_group_id(event, group_id)
         if not group_id:
-            return _no_group()
+            return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "query")
         if not allowed:
