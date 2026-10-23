@@ -92,7 +92,7 @@ NOTIFY_CATEGORY_BAN = "禁言"
 NOTIFY_CATEGORY_KICK = "踢人"
 NOTIFY_CATEGORY_RECALL = "撤回"
 NOTIFY_CATEGORY_BLACKLIST = "黑名单"
-NOTIFY_CATEGORY_EXPORT = "群导出"
+NOTIFY_CATEGORY_EXPORT = "导出"
 NOTIFY_CATEGORY_REVIEW_NOTICE = "进群审核通知"
 
 #: Categories described as receipts: they are answered in the issuing session.
@@ -857,10 +857,12 @@ def normalize_notify_routes(raw: Any) -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
 
     mirror = [
-        str(item)
+        # ``群导出`` was renamed to ``导出``; the old value is accepted so an
+        # existing configuration keeps working.
+        "导出" if item == "群导出" else str(item)
         for item in normalize_id_list(source.get("receipt_to_manage_session"))
-        if item in NOTIFY_RECEIPT_CATEGORIES
     ]
+    mirror = [item for item in mirror if item in NOTIFY_RECEIPT_CATEGORIES]
 
     review_target = str(source.get("review_notice_target") or "").strip().lower()
     if review_target not in NOTIFY_REVIEW_TARGETS:

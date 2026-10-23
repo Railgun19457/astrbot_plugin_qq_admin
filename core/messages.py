@@ -24,6 +24,10 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "no_permission": "你没有权限执行该操作：{reason}",
     "no_target": "请 @ 一个目标，或回复对方的消息后再执行本指令",
     "bad_duration": "时长格式不正确，示例：10m、2h、1d、600",
+    "usage": "用法：{usage}（目标支持 @某人、回复对方消息或直接填写 QQ 号）",
+    "group_required": (
+        "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：#123456；可用：{groups}"
+    ),
     "blacklist_added": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}\n期限：{duration}",
     "blacklist_removed": "已将 {target_name}({target_id}) 移出黑名单",
     "blacklist_not_found": "{target_name}({target_id}) 不在黑名单中",
@@ -46,9 +50,6 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "review_pending_hint": "引用本条消息回复「同意」或「拒绝」即可处理",
     "review_reply_ambiguous": (
         "当前有 {count} 条待处理申请，请引用对应的通知消息后再回复同意/拒绝"
-    ),
-    "manage_unsupported": (
-        "该指令需要在目标群内执行。管理会话仅支持：黑名单、拉黑、解除拉黑、群管状态"
     ),
     "manage_ambiguous": (
         "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"

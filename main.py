@@ -22,7 +22,7 @@ from astrbot.api.message_components import AtAll
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
-from .core.args import parse_duration_token, parse_target_args
+from .core.args import parse_duration_token, parse_target_args, split_group_selector
 from .core.audit import AuditLog
 from .core.blacklist import BlacklistStore
 from .core.config import (
@@ -529,26 +529,21 @@ class QQAdminPlugin(Star):
     async def _should_skip(
         self,
         event: AstrMessageEvent,
-        *,
-        manage_ok: bool = False,
     ) -> bool:
         """Check the cheap preconditions shared by every command handler.
 
         Commands are silently ignored rather than answered when the plugin is
         disabled, when the adapter is not aiocqhttp (the OneBot actions this
-        plugin relies on do not exist elsewhere), when the message does not come
-        from a group, or when the group is not managed. Bailing out here also
-        avoids the extra protocol calls that permission resolution would
-        otherwise make.
+        plugin relies on do not exist elsewhere), or when the session is neither
+        a managed group nor a manage session. Bailing out here also avoids the
+        extra protocol calls that permission resolution would otherwise make.
 
-        A manage session counts as a valid place to run the commands that make
-        sense there (``manage_ok``). For the others the event is stopped with a
-        short explanation, because leaving it alone would hand a group
-        management command to the LLM.
+        There is no per-command availability list: a manage session can run
+        everything a managed group can, and a command that needs one concrete
+        group asks for it with a ``#群号`` selector (see :meth:`_action_group`).
 
         Args:
             event: Event of the command.
-            manage_ok: Whether the command is available inside a manage session.
 
         Returns:
             ``True`` when the handler must return without doing anything.
@@ -557,26 +552,60 @@ class QQAdminPlugin(Star):
             return True
         if event.get_platform_name() != SUPPORTED_PLATFORM:
             return True
-        group_id = str(event.get_group_id() or "")
-        if not group_id:
-            return True
         if self._group_set_for(event) is not None:
             return False
-
-        if not self._manage_sets(event):
-            logger.info(
-                f"[QQAdmin] 群 {group_id} 未加入任何群组，已忽略该指令",
-            )
-            return True
-
-        if manage_ok:
+        if self._manage_sets(event):
             return False
 
-        # A manage session is ours, but this command needs a concrete group.
-        await event.send(event.plain_result(self._text("manage_unsupported")))
-        event.stop_event()
-        event.should_call_llm(False)
+        logger.info(
+            f"[QQAdmin] 会话 {event.unified_msg_origin} 未加入任何群组，已忽略该指令",
+        )
         return True
+
+    def _action_group(
+        self,
+        event: AstrMessageEvent,
+        selector: str = "",
+    ) -> tuple[str, str]:
+        """Resolve the group an action applies to.
+
+        Inside a managed group the answer is the group itself. In a manage
+        session there is no such context, so the group has to come from the
+        ``#群号`` selector, or be unambiguous because the owning group set (or
+        the session) is bound to exactly one group.
+
+        Args:
+            event: Event of the command.
+            selector: Optional group id taken from a ``#群号`` token.
+
+        Returns:
+            ``(group_id, error)``; ``error`` is a user-facing message when the
+            group cannot be determined.
+        """
+        text = str(selector or "").strip()
+        if text:
+            group_set = find_group_set(self.group_sets, text)
+            if group_set is None:
+                return "", self._text("group_not_found", selector=f"#{text}")
+            if text not in group_set["group_ids"]:
+                return "", self._text("group_not_found", selector=f"#{text}")
+            return text, ""
+
+        group_set = self._group_set_for(event)
+        if group_set is not None:
+            return str(event.get_group_id() or ""), ""
+
+        # A manage session: fall back to the groups it controls.
+        bound = self._manage_sets(event)
+        group_ids = [group_id for item in bound for group_id in item["group_ids"]]
+        if len(group_ids) == 1:
+            return group_ids[0], ""
+        if not group_ids:
+            return "", self._text("group_not_found", selector="当前会话")
+        return "", self._text(
+            "group_required",
+            groups="、".join(f"#{group_id}" for group_id in group_ids),
+        )
 
     def _group_set_for(self, event: AstrMessageEvent) -> dict[str, Any] | None:
         """Find the group set owning the group an event came from.
@@ -907,13 +936,18 @@ class QQAdminPlugin(Star):
 
         Args:
             event: 消息事件。
-            args: 后续参数，形如「@某人 10m 刷屏」或「全体 1h」，顺序任意。
-                允许省略。
+            args: 后续参数，形如「@某人 10m」或「全体 1h」，顺序任意；
+                在管理会话里可用「#群号」指定目标群。允许省略。
         """
         if await self._should_skip(event):
             return
         tokens = str(args or "").split()
-        group_id = str(event.get_group_id())
+        selector, tokens = split_group_selector(tokens)
+        group_id, error = self._action_group(event, selector)
+        if error:
+            async for item in self._reply(event, error):
+                yield item
+            return
 
         operator = await self._permission_context(event)
 
@@ -931,7 +965,11 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        parsed = parse_target_args(tokens, extract_at_targets(event))
+        parsed = parse_target_args(
+            tokens,
+            extract_at_targets(event),
+            allow_reason=False,
+        )
 
         allowed, deny_reason = check_capability(
             operator,
@@ -948,6 +986,14 @@ class QQAdminPlugin(Star):
 
         if parsed.unknown_duration:
             async for item in self._reply(event, self._text("bad_duration")):
+                yield item
+            return
+
+        if parsed.unexpected:
+            async for item in self._reply(
+                event,
+                self._text("usage", usage="禁言 [#群号] @某人 [时长]"),
+            ):
                 yield item
             return
 
@@ -986,7 +1032,6 @@ class QQAdminPlugin(Star):
                     target=user_id,
                     group_id=group_id,
                     duration=duration,
-                    reason=parsed.reason,
                 )
             else:
                 lines.append(await self._describe_failure(result, user_id))
@@ -998,7 +1043,6 @@ class QQAdminPlugin(Star):
                     result="failed",
                     error=result.error,
                     duration=duration,
-                    reason=parsed.reason,
                 )
 
         async for item in self._reply(
@@ -1134,12 +1178,18 @@ class QQAdminPlugin(Star):
 
         Args:
             event: 消息事件。
-            args: 后续参数，形如「@某人」或「全体」。允许省略。
+            args: 后续参数，形如「@某人」或「全体」；在管理会话里可用
+                「#群号」指定目标群。允许省略。
         """
         if await self._should_skip(event):
             return
-        text = str(args or "").strip()
-        group_id = str(event.get_group_id())
+        selector, rest = split_group_selector(str(args or "").split())
+        group_id, error = self._action_group(event, selector)
+        if error:
+            async for item in self._reply(event, error):
+                yield item
+            return
+        text = " ".join(rest).strip()
         operator = await self._permission_context(event)
 
         if any(is_all_target(token) for token in text.split()) or any(
@@ -1212,7 +1262,18 @@ class QQAdminPlugin(Star):
             return
 
         # 解禁只需要目标，不需要时长与理由，因此只需挑出 QQ 号。
-        parsed = parse_target_args(str(text or "").split(), extract_at_targets(event))
+        parsed = parse_target_args(
+            rest,
+            extract_at_targets(event),
+            allow_reason=False,
+        )
+        if parsed.unexpected:
+            async for item in self._reply(
+                event,
+                self._text("usage", usage="解禁 [#群号] @某人"),
+            ):
+                yield item
+            return
         if not parsed.targets:
             async for item in self._reply(event, self._text("no_target")):
                 yield item
@@ -1263,12 +1324,17 @@ class QQAdminPlugin(Star):
 
         Args:
             event: 消息事件。
-            args: 后续参数，形如「@某人 广告」。允许省略。
+            args: 后续参数，形如「@某人」；在管理会话里可用「#群号」指定
+                目标群。允许省略。
         """
         if await self._should_skip(event):
             return
-        text = str(args or "").strip()
-        group_id = str(event.get_group_id())
+        selector, rest = split_group_selector(str(args or "").split())
+        group_id, error = self._action_group(event, selector)
+        if error:
+            async for item in self._reply(event, error):
+                yield item
+            return
         operator = await self._permission_context(event)
 
         allowed, deny_reason = check_capability(
@@ -1284,13 +1350,23 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        parsed = parse_target_args(str(text or "").split(), extract_at_targets(event))
+        parsed = parse_target_args(
+            rest,
+            extract_at_targets(event),
+            allow_reason=False,
+        )
+        if parsed.unexpected:
+            async for item in self._reply(
+                event,
+                self._text("usage", usage="踢 [#群号] @某人"),
+            ):
+                yield item
+            return
         if not parsed.targets:
             async for item in self._reply(event, self._text("no_target")):
                 yield item
             return
         targets = parsed.targets
-        reason = parsed.reason
 
         names = [
             await self._resolve_member_name(event, group_id, user_id)
@@ -1299,8 +1375,6 @@ class QQAdminPlugin(Star):
         summary = "移出本群：" + "、".join(
             f"{name}({uid})" for name, uid in zip(names, targets, strict=False)
         )
-        if reason:
-            summary += f"（理由：{reason}）"
 
         if self.confirm.is_required("kick"):
             action = PendingAction(
@@ -1340,7 +1414,6 @@ class QQAdminPlugin(Star):
                     operator,
                     target=user_id,
                     group_id=group_id,
-                    reason=reason,
                 )
             else:
                 lines.append(await self._describe_failure(result, user_id))
@@ -1351,7 +1424,6 @@ class QQAdminPlugin(Star):
                     group_id=group_id,
                     result="failed",
                     error=result.error,
-                    reason=reason,
                 )
 
         async for item in self._reply(
@@ -1446,27 +1518,29 @@ class QQAdminPlugin(Star):
         Args:
             event: 消息事件。
         """
-        if await self._should_skip(event, manage_ok=True):
+        if await self._should_skip(event):
             return
         lines = [
             "QQ群管 指令列表",
-            "  禁言 @某人 [时长] [理由]   如：禁言 @小王 10m 刷屏",
+            "  禁言 @某人 [时长]          如：禁言 @小王 10m，不带时长用群组默认值",
             "  禁言 全体 [时长]           全群禁言，带时长会自动解除",
             "  解禁 @某人 / 解禁 全体",
-            "  踢 @某人 [理由]            将成员移出本群",
+            "  踢 @某人                   将成员移出本群",
             "  撤回                       回复目标消息后使用",
             "  拉黑 @某人 [原因] [时长]   加入本群组共享黑名单",
             "  解除拉黑 @某人             移出黑名单",
-            "  黑名单 [群号/群组名]       查看本群组黑名单",
-            "  群导出 成员 / 黑名单       导出 xlsx 并上传群文件",
+            "  黑名单 [群号或群组名]      查看本群组黑名单",
+            "  导出 成员 / 黑名单         导出 xlsx 并上传群文件",
             "  群管状态                   查看运行状态与群组归属",
             "",
+            "目标支持 @某人、引用对方消息、或直接填写 QQ 号，三种写法等价。",
             "进群申请需要人工确认时，引用通知消息回复「同意」或「拒绝」即可处理。",
-            "管理会话（群组配置里的「管理会话」）专供群管理员使用：进群审核通知、",
-            "黑名单 / 拉黑 / 解除拉黑 / 群管状态 均可直接在那里执行。",
+            "",
+            "在管理会话（群组配置里的「管理会话」）里所有指令都能用；指令不在目标群内",
+            "执行时，用 #群号 指明目标群，例如：#123456 禁言 @某人 10m。",
             "  黑名单 通知设置 [群号或群组名] 查看该群组的通知路由",
             "",
-            "提示：指令与 @ 之间需要空格；时长与目标的位置可以互换；若与其他插件指令重名，",
+            "提示：指令与参数之间需要空格；时长与目标的位置可以互换；若与其他插件指令重名，",
             "可在 WebUI 的「插件 → 管理行为」中重命名。",
         ]
         async for item in self._reply(event, "\n".join(lines)):
@@ -1481,7 +1555,7 @@ class QQAdminPlugin(Star):
         Args:
             event: 消息事件。
         """
-        if await self._should_skip(event, manage_ok=True):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1655,7 +1729,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 后续参数，形如「@某人 发广告 7d」。允许省略。
         """
-        if await self._should_skip(event, manage_ok=True):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1798,7 +1872,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 后续参数，形如「@某人」。允许省略。
         """
-        if await self._should_skip(event, manage_ok=True):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -1882,7 +1956,7 @@ class QQAdminPlugin(Star):
             event: 消息事件。
             args: 可选的群号或群组名；在管理会话里对应多个群组时必须填写。
         """
-        if await self._should_skip(event, manage_ok=True):
+        if await self._should_skip(event):
             return
         group_id = str(event.get_group_id())
         operator = await self._permission_context(event)
@@ -2752,8 +2826,8 @@ class QQAdminPlugin(Star):
     # ------------------------------------------------------------------ #
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("群导出", alias={"gexport"})
-    @filter.custom_filter(mentioned_command("群导出", "gexport"))
+    @filter.command("导出", alias={"gexport", "群导出"})
+    @filter.custom_filter(mentioned_command("导出", "gexport", "群导出"))
     async def export_command(
         self,
         event: AstrMessageEvent,
@@ -2763,11 +2837,17 @@ class QQAdminPlugin(Star):
 
         Args:
             event: 消息事件。
-            args: 「成员」或「黑名单」。允许省略。
+            args: 「成员」或「黑名单」；在管理会话里可用「#群号」指定
+                目标群。允许省略。
         """
         if await self._should_skip(event):
             return
-        group_id = str(event.get_group_id())
+        selector, rest = split_group_selector(str(args or "").split())
+        group_id, error = self._action_group(event, selector)
+        if error:
+            async for item in self._reply(event, error):
+                yield item
+            return
         operator = await self._permission_context(event)
 
         allowed, deny_reason = check_capability(
@@ -2783,17 +2863,21 @@ class QQAdminPlugin(Star):
                 yield item
             return
 
-        kind = str(args or "").strip() or "成员"
+        kind = " ".join(rest).strip() or "成员"
         if kind not in ("成员", "黑名单", "members", "blacklist"):
             async for item in self._reply(
                 event,
-                "用法：群导出 成员 / 群导出 黑名单",
+                self._text("usage", usage="导出 [#群号] 成员 / 黑名单"),
             ):
                 yield item
             return
 
+        group_set = self._group_set_for(event) or find_group_set(
+            self.group_sets,
+            group_id,
+        )
         if kind in ("黑名单", "blacklist"):
-            scope = self._scope(group_id)
+            scope = self._scope(group_id, group_set)
             entries = self.blacklist.list_entries(scope)
             if not entries:
                 async for item in self._reply(
@@ -2802,7 +2886,6 @@ class QQAdminPlugin(Star):
                 ):
                     yield item
                 return
-            group_set = find_group_set(self.group_sets, group_id)
             result = self.exporter.export_blacklist(
                 scope,
                 entries,

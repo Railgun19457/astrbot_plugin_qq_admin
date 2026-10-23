@@ -180,7 +180,6 @@ class QqBanMemberTool(_PluginTool):
                     "type": "integer",
                     "description": "禁言秒数，0 表示解禁。最长 2592000（30 天）",
                 },
-                "reason": {"type": "string", "description": "禁言理由，可省略"},
             },
             "required": ["duration_seconds"],
         },
@@ -191,7 +190,6 @@ class QqBanMemberTool(_PluginTool):
         event: AstrMessageEvent,
         duration_seconds: int,
         user_id: str = "",
-        reason: str = "",
     ) -> str:
         """Execute the mute.
 
@@ -199,7 +197,6 @@ class QqBanMemberTool(_PluginTool):
             event: The tool call event.
             duration_seconds: Mute duration; ``0`` lifts an existing mute.
             user_id: Target QQ number, optional.
-            reason: Justification recorded in the audit log.
 
         Returns:
             A human readable result or an ``error:`` string.
@@ -244,7 +241,6 @@ class QqBanMemberTool(_PluginTool):
             target=target,
             group_id=group_id,
             duration=duration,
-            reason=reason,
         )
         if duration == 0:
             return render_template(
@@ -281,7 +277,6 @@ class QqWholeBanTool(_PluginTool):
                     "description": "开启后自动解除的秒数，省略或 0 表示不自动解除，"
                     "最长 2592000（30 天）",
                 },
-                "reason": {"type": "string", "description": "操作理由，可省略"},
                 "confirm": {
                     "type": "boolean",
                     "description": "高危操作。首次调用请传 false 向用户确认，用户同意后再传 true",
@@ -296,7 +291,6 @@ class QqWholeBanTool(_PluginTool):
         event: AstrMessageEvent,
         enabled: bool,
         duration_seconds: int = 0,
-        reason: str = "",
         confirm: bool = False,
     ) -> str:
         """Execute the toggle.
@@ -306,7 +300,6 @@ class QqWholeBanTool(_PluginTool):
             enabled: ``True`` mutes everyone, ``False`` lifts it.
             duration_seconds: When enabling, seconds until the mute is lifted
                 automatically; ``0`` keeps it until lifted manually.
-            reason: Justification recorded in the audit log.
             confirm: Must be ``True`` to actually act.
 
         Returns:
@@ -352,7 +345,6 @@ class QqWholeBanTool(_PluginTool):
             event,
             group_id=group_id,
             duration=duration,
-            reason=reason,
         )
 
         if not enabled:
@@ -387,7 +379,6 @@ class QqKickMemberTool(_PluginTool):
             "type": "object",
             "properties": {
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
-                "reason": {"type": "string", "description": "踢出理由，可省略"},
                 "reject_add": {
                     "type": "boolean",
                     "description": "是否同时拒绝其再次申请，默认 false",
@@ -405,7 +396,6 @@ class QqKickMemberTool(_PluginTool):
         self,
         event: AstrMessageEvent,
         user_id: str = "",
-        reason: str = "",
         reject_add: bool = False,
         confirm: bool = False,
     ) -> str:
@@ -414,7 +404,6 @@ class QqKickMemberTool(_PluginTool):
         Args:
             event: The tool call event.
             user_id: Target QQ number, optional.
-            reason: Justification recorded in the audit log.
             reject_add: Also reject future join requests.
             confirm: Must be ``True`` to actually act.
 
@@ -437,8 +426,7 @@ class QqKickMemberTool(_PluginTool):
         name = await plugin._resolve_member_name(event, group_id, target)
         if not confirm:
             return (
-                f"待确认：将 {name}({target}) 移出本群"
-                f"{f'，理由：{reason}' if reason else ''}。"
+                f"待确认：将 {name}({target}) 移出本群。"
                 "请先向用户确认，用户同意后再次调用本工具并把 confirm 设为 true。"
             )
 
@@ -456,7 +444,6 @@ class QqKickMemberTool(_PluginTool):
                 group_id=group_id,
                 result="failed",
                 error=result.error,
-                reason=reason,
             )
             return _failed(plugin, result.error, unsupported=result.unsupported)
 
@@ -465,7 +452,6 @@ class QqKickMemberTool(_PluginTool):
             event,
             target=target,
             group_id=group_id,
-            reason=reason,
             reject_add=bool(reject_add),
         )
         return render_template(
