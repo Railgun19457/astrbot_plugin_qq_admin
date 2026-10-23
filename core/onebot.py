@@ -281,41 +281,6 @@ class OneBotClient:
             message_id=self._as_int(message_id),
         )
 
-    async def set_group_card(
-        self,
-        event: AstrMessageEvent,
-        group_id: str,
-        user_id: str,
-        card: str,
-    ) -> ActionResult:
-        """Change a member's group nickname.
-
-        Args:
-            event: Message event.
-            group_id: Target group.
-            user_id: Target member.
-            card: New nickname. An empty string clears it.
-
-        Returns:
-            The action result.
-
-        Note:
-            Kept as a ready-to-use wrapper without any command or LLM tool bound
-            to it; enabling the feature later only requires registering a
-            handler.
-        """
-        return await self.call_action(
-            event,
-            "set_group_card",
-            group_id=self._as_int(group_id),
-            user_id=self._as_int(user_id),
-            card=str(card or ""),
-        )
-
-    # ------------------------------------------------------------------ #
-    #  Queries
-    # ------------------------------------------------------------------ #
-
     async def get_group_member_info(
         self,
         event: AstrMessageEvent,
@@ -424,10 +389,6 @@ class OneBotClient:
         )
         return result.data if result.ok and isinstance(result.data, dict) else None
 
-    # ------------------------------------------------------------------ #
-    #  Group notice (private protocol extension)
-    # ------------------------------------------------------------------ #
-
     async def send_group_notice(
         self,
         event: AstrMessageEvent,
@@ -450,36 +411,6 @@ class OneBotClient:
             group_id=self._as_int(group_id),
             content=str(content or ""),
         )
-
-    async def get_group_notice(
-        self,
-        event: AstrMessageEvent,
-        group_id: str,
-    ) -> list[dict[str, Any]]:
-        """Read the current group announcement.
-
-        Args:
-            event: Message event.
-            group_id: Target group.
-
-        Returns:
-            A list of notice payloads, empty when unsupported or on failure.
-
-        Note:
-            ``_get_group_notice`` is a protocol extension and is not implemented
-            by every OneBot server; callers should treat an empty list as
-            "unavailable" and tell the user so.
-        """
-        result = await self.call_action(
-            event,
-            "_get_group_notice",
-            group_id=self._as_int(group_id),
-        )
-        return result.data if result.ok and isinstance(result.data, list) else []
-
-    # ------------------------------------------------------------------ #
-    #  Join requests
-    # ------------------------------------------------------------------ #
 
     async def set_group_add_request(
         self,

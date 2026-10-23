@@ -49,11 +49,6 @@ class WholeBanRecord:
         """Seconds left before the mute expires (may be negative)."""
         return int(self.expires_at - time.time())
 
-    @property
-    def is_expired(self) -> bool:
-        """Whether the deadline has already passed."""
-        return time.time() >= self.expires_at
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize for storage.
 

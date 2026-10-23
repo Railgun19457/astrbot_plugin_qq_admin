@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.10.0-2026-10-23
+
+### 变更
+
+- **帮助与状态重新排版**：`/群管` 按功能分组（禁言 / 成员 / 消息 / 黑名单 / 导出 / 状态），`/群管状态` 改为分区显示（会话 / 通知路由 / 本群策略），管理会话的状态按群组分块；两处末尾都给出对方的用法提示
+- **帮助提示指令前缀**：文案会读取 AstrBot 的唤醒前缀（默认 `/`）并按实际前缀渲染示例，同时说明也可以 @ 机器人或引用机器人消息后直接发指令名
+- **黑名单改为永久**：内部不再保留到期时间，`/拉黑`、`qq_blacklist_add`、名单显示与导出表格中的「期限 / 到期时间」一并移除
+
+### 移除
+
+- **清理全部版本兼容代码**（项目尚未正式使用，不需要保留迁移路径）：拉黑的临时期限、`blacklist.kick_on_add` 的旧布尔写法、`群导出` 的类别名与指令别名、`manage_unsupported` / `notification_settings` 模板
+- **清理未使用的代码**：`group_umo`、`DEFAULT_REVIEW_POLICY`、`NOTIFY_CATEGORIES`、`utils.shorten`、`WholeBanRecord.is_expired`、`OneBotClient.set_group_card` / `get_group_notice`、`PendingAction.payload`
+
 ## v0.9.1-2026-10-23
 
 ### 新增

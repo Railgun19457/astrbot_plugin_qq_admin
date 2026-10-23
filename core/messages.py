@@ -27,9 +27,9 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "bad_duration": "时长格式不正确，示例：10m、2h、1d、600",
     "usage": "用法：{usage}（目标支持 @某人、回复对方消息或直接填写 QQ 号）",
     "group_required": (
-        "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：#123456；可用：{groups}"
+        "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：禁言 #123456 @某人；可用：{groups}"
     ),
-    "blacklist_added": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}\n期限：{duration}",
+    "blacklist_added": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}",
     "blacklist_removed": "已将 {target_name}({target_id}) 移出黑名单",
     "blacklist_not_found": "{target_name}({target_id}) 不在黑名单中",
     "blacklist_disabled": "黑名单功能已在插件配置中关闭",
@@ -56,9 +56,6 @@ DEFAULT_TEMPLATES: dict[str, str] = {
         "该管理会话同时对应多个群组（{names}），请写明群号或群组名再试"
     ),
     "group_not_found": "未找到群组：{selector}",
-    "notification_settings": (
-        "在管理会话发送「黑名单 通知设置 [群号或群组名]」可查看该群组的通知路由"
-    ),
     "member_list_failed": "无法获取群成员列表，请稍后重试",
     "export_success": "已导出{kind}表格（{count} 条）并上传到群文件",
     "export_local_only": "已生成{kind}表格（{count} 条），但上传失败。\n本地路径：{path}",

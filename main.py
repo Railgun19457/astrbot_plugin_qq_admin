@@ -1100,7 +1100,6 @@ class QQAdminPlugin(Star):
         if self.confirm.is_required("whole_ban"):
             action = PendingAction(
                 summary=summary,
-                payload={"group_id": group_id, "duration": duration},
                 capability="whole_ban",
             )
             async for item in self._reply(event, self.confirm.build_prompt(summary)):
@@ -1380,7 +1379,6 @@ class QQAdminPlugin(Star):
         if self.confirm.is_required("kick"):
             action = PendingAction(
                 summary=summary,
-                payload={"group_id": group_id, "targets": list(targets)},
                 capability="kick",
             )
             async for item in self._reply(event, self.confirm.build_prompt(summary)):
@@ -1510,6 +1508,23 @@ class QQAdminPlugin(Star):
     #  Commands: help / status
     # ------------------------------------------------------------------ #
 
+    def _command_prefix(self) -> str:
+        """Resolve the marker that invokes a command.
+
+        AstrBot matches commands after its own wake prefix, so the help text has
+        to show whatever the deployment actually uses instead of assuming ``/``.
+        Mentioning the bot works too and needs no prefix at all.
+
+        Returns:
+            The first configured wake prefix, or ``/`` when none is set.
+        """
+        try:
+            config = self.context.get_config()
+            prefixes = [str(item) for item in (config.get("wake_prefix") or []) if item]
+        except Exception:  # noqa: BLE001 - help must render even without config
+            prefixes = []
+        return prefixes[0] if prefixes else "/"
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("群管", alias={"qqadmin"})
     @filter.custom_filter(mentioned_command("群管", "qqadmin"))
@@ -1521,28 +1536,43 @@ class QQAdminPlugin(Star):
         """
         if await self._should_skip(event):
             return
+        prefix = self._command_prefix()
         lines = [
-            "QQ群管 指令列表",
-            "  禁言 @某人 [时长]          如：禁言 @小王 10m，不带时长用群组默认值",
-            "  禁言 全体 [时长]           全群禁言，带时长会自动解除",
-            "  解禁 @某人 / 解禁 全体",
-            "  踢 @某人                   将成员移出本群",
-            "  撤回                       回复目标消息后使用",
-            "  拉黑 @某人 [原因] [时长]   加入本群组共享黑名单",
-            "  解除拉黑 @某人             移出黑名单",
-            "  黑名单 [群号或群组名]      查看本群组黑名单",
-            "  导出 成员 / 黑名单         导出 xlsx 并上传群文件",
-            "  群管状态                   查看运行状态与群组归属",
+            "QQ群管 · 指令一览",
+            f"指令前缀跟随 AstrBot 的唤醒前缀（当前 {prefix}），也可以 @机器人 或引用机器人消息后直接发指令名。",
             "",
-            "目标支持 @某人、引用对方消息、或直接填写 QQ 号，三种写法等价。",
-            "进群申请需要人工确认时，引用通知消息回复「同意」或「拒绝」即可处理。",
+            "【禁言】",
+            f"  {prefix}禁言 @某人 [时长]    不带时长用群组默认值，可写 10m / 2h / 1d / 600",
+            f"  {prefix}禁言 全体 [时长]     全群禁言，带时长会到时自动解除",
+            f"  {prefix}解禁 @某人 ｜ {prefix}解禁 全体",
             "",
-            "在管理会话（群组配置里的「管理会话」）里所有指令都能用；指令不在目标群内",
-            "执行时，用 #群号 指明目标群，例如：#123456 禁言 @某人 10m。",
-            "  黑名单 通知设置 [群号或群组名] 查看该群组的通知路由",
+            "【成员】",
+            f"  {prefix}踢 @某人             移出本群（默认需要二次确认）",
             "",
-            "提示：指令与参数之间需要空格；时长与目标的位置可以互换；若与其他插件指令重名，",
-            "可在 WebUI 的「插件 → 管理行为」中重命名。",
+            "【消息】",
+            f"  {prefix}撤回                  先引用要撤回的消息，再发送本指令",
+            "",
+            "【黑名单】组内所有群共享，拉黑后永久有效",
+            f"  {prefix}拉黑 @某人 [原因]     原因会记入导出表格",
+            f"  {prefix}解除拉黑 @某人",
+            f"  {prefix}黑名单 [群号或群组名] 查看名单与原因",
+            "",
+            "【导出】生成 xlsx 并上传群文件",
+            f"  {prefix}导出 成员 ｜ {prefix}导出 黑名单",
+            "",
+            "【状态】",
+            f"  {prefix}群管状态             运行状态、群组归属与通知路由",
+            f"  {prefix}群管                 本帮助",
+            f"  {prefix}黑名单 通知设置 [群号或群组名]  单独查看某群组的通知路由",
+            "",
+            "目标写法：@某人 ｜ 引用对方消息 ｜ 直接填写 QQ 号，三种等价且可混用。",
+            "进群申请需要人工确认时：引用通知消息回复「同意」或「拒绝」即可处理。",
+            "",
+            "在管理会话（群组配置里的「管理会话」）里以上指令全部可用；指令不在目标群内",
+            f"执行时用 #群号 指明目标群，例如：{prefix}禁言 #123456 @某人 10m（该管理会话只对应一个群时可省略）。",
+            "",
+            "参数与指令之间需要空格；时长与目标的位置可以互换；与其他插件重名时，",
+            "可在 WebUI 的「插件 → 管理行为」中改名。",
         ]
         async for item in self._reply(event, "\n".join(lines)):
             yield item
@@ -1579,50 +1609,60 @@ class QQAdminPlugin(Star):
             async for item in self._reply(event, self._manage_status(event)):
                 yield item
             return
-        lines = [
-            "QQ群管 运行状态",
-            f"  插件：{'已启用' if self.enabled else '已禁用'}",
-            f"  当前群：{group_id}",
-            f"  所属群组：{group_set['name']}",
-            f"  组内群数：{len(group_set['group_ids'])}",
-            f"  管理会话：{group_set['manage_session'] or '未配置（通知回退到当前群）'}",
-            f"  已配置群组总数：{len(self.group_sets)}",
-        ]
+
         policy = self._policy(group_id, group_set)
         blacklist_policy = policy["blacklist"]
         review = self._review_policy(group_id, group_set)
+        manage_session = str(group_set["manage_session"] or "")
+
+        lines = [
+            "QQ群管 · 运行状态",
+            "【会话】",
+            f"  插件：{'已启用' if self.enabled else '已禁用'}",
+            f"  当前群：{group_id}",
+            f"  所属群组：{group_set['name']}（组内 {len(group_set['group_ids'])} 个群）",
+            f"  管理会话：{manage_session or '未配置（通知回退到本群）'}",
+            "【通知路由】",
+        ]
+        lines.extend(self._notify_route_lines(str(group_set["name"]), "  "))
+
+        lines.append("【本群策略】")
         lines.append(
-            f"  默认禁言时长：{format_duration(policy['default_ban_duration'])}",
+            f"  默认禁言时长：{format_duration(policy['default_ban_duration'])}"
         )
         lines.append(
             f"  黑名单：{'已启用' if blacklist_policy['enabled'] else '已关闭'}"
-            f" | 发言拦截：{'已开启' if blacklist_policy['block_message'] else '已关闭'}"
-            f" | 拉黑踢出：{kick_mode_label(blacklist_policy['kick_on_add'])}",
+            f"（发言撤回{'开' if blacklist_policy['block_message'] else '关'}"
+            f"、拉黑踢出{kick_mode_label(blacklist_policy['kick_on_add'])}"
+            f"、条目 {self.blacklist.count(self._scope(group_id, group_set))}）",
         )
         if review is None:
-            review_line = "  进群审核：未配置（本群未加入任何群组）"
+            lines.append("  进群审核：未配置")
         else:
-            review_line = f"  进群审核：{'已开启' if review['enabled'] else '已关闭'}"
+            review_bits = ["已开启" if review["enabled"] else "已关闭"]
             if review["enabled"]:
-                review_line += f" | 默认行为：{self._default_action_label(review)}"
-            sources = self._review_exempt_sources(group_id, group_set)
-            if sources and review["enabled"]:
-                review_line += f" | 跨群免审核：{len(sources)} 个来源群"
-        lines.append(review_line)
-        lines.append(
-            f"  黑名单条目：{self.blacklist.count(self._scope(group_id, group_set))}",
-        )
+                review_bits.append(f"默认行为{self._default_action_label(review)}")
+                sources = self._review_exempt_sources(group_id, group_set)
+                if sources:
+                    review_bits.append(f"跨群免审核 {len(sources)} 个来源群")
+            lines.append(f"  进群审核：{' · '.join(review_bits)}")
 
+        warnings: list[str] = []
         conflicted = self._conflicting_groups()
         if conflicted:
-            lines.append(f"  配置冲突群号：{', '.join(conflicted)}")
-
-        names = [group_set["name"] for group_set in self.group_sets]
+            warnings.append(f"配置冲突群号：{', '.join(conflicted)}")
+        names = [item["name"] for item in self.group_sets]
         duplicated = sorted({name for name in names if names.count(name) > 1})
         if duplicated:
-            lines.append(f"  群组重名：{'、'.join(duplicated)}（同名群组共享黑名单）")
+            warnings.append(f"群组重名：{'、'.join(duplicated)}（同名群组共享黑名单）")
+        if warnings:
+            lines.append("【配置提示】")
+            lines.extend(f"  {item}" for item in warnings)
 
-        lines.append(self._text("notification_settings"))
+        lines.append(
+            f"（共 {len(self.group_sets)} 个群组；"
+            f"{self._command_prefix()}群管 查看指令用法）",
+        )
 
         async for item in self._reply(event, "\n".join(lines)):
             yield item
@@ -1641,21 +1681,32 @@ class QQAdminPlugin(Star):
             The status text.
         """
         lines = [
-            "QQ群管 运行状态（管理会话）",
+            "QQ群管 · 运行状态（管理会话）",
+            "【会话】",
             f"  插件：{'已启用' if self.enabled else '已禁用'}",
             f"  当前会话：{event.unified_msg_origin}",
-            f"  已配置群组总数：{len(self.group_sets)}",
+            f"  已配置群组：{len(self.group_sets)} 个",
         ]
         for group_set in self._manage_sets(event):
             review = group_set["join_review"]["policy"]
+            groups = "、".join(group_set["group_ids"]) or "（未填写群号）"
+            lines.append(f"【群组「{group_set['name']}」】")
+            lines.append(f"  群：{groups}")
             lines.append(
-                f"  群组「{group_set['name']}」："
-                f"群 {', '.join(group_set['group_ids']) or '（未填写群号）'}"
-                f" | 黑名单 {self.blacklist.count(str(group_set['name']))} 条"
-                f" | 进群审核 {'已开启（默认行为：' + self._default_action_label(review) + '）' if review['enabled'] else '已关闭'}",
+                f"  黑名单 {self.blacklist.count(str(group_set['name']))} 条"
+                f" · 进群审核 "
+                + (
+                    f"已开启（默认行为{self._default_action_label(review)}）"
+                    if review["enabled"]
+                    else "已关闭"
+                ),
             )
-            lines.extend(self._notify_route_lines(group_set["name"], "    "))
-        lines.append("  可用指令：黑名单 / 拉黑 / 解除拉黑 / 群管状态")
+            lines.append("  通知路由：")
+            lines.extend(self._notify_route_lines(str(group_set["name"]), "    "))
+        lines.append(
+            f"（本会话指令与群内一致，需指定群时用 #群号；"
+            f"{self._command_prefix()}群管 查看指令用法）",
+        )
         return "\n".join(lines)
 
     async def _auto_kick_after_blacklist(
@@ -1875,7 +1926,6 @@ class QQAdminPlugin(Star):
                 user_id,
                 reason=reason,
                 operator=operator.user_id,
-                duration=0,
                 nickname=nickname,
             )
             lines.append(
@@ -1884,7 +1934,6 @@ class QQAdminPlugin(Star):
                     target_name=nickname,
                     target_id=user_id,
                     reason=reason,
-                    duration="永久",
                 ),
             )
             self._log_action(
@@ -2091,14 +2140,7 @@ class QQAdminPlugin(Star):
         lines = [header]
         for index, entry in enumerate(entries, start=1):
             name = entry.nickname or entry.user_id
-            expiry = (
-                format_duration(int(entry.expires_at - entry.created_at))
-                if entry.is_temporary
-                else "永久"
-            )
-            lines.append(
-                f"{index}. {name}({entry.user_id}) | {entry.reason} | {expiry}",
-            )
+            lines.append(f"{index}. {name}({entry.user_id}) · {entry.reason}")
         async for item in self._reply(event, "\n".join(lines)):
             yield item
 
@@ -2885,8 +2927,8 @@ class QQAdminPlugin(Star):
     # ------------------------------------------------------------------ #
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("导出", alias={"gexport", "群导出"})
-    @filter.custom_filter(mentioned_command("导出", "gexport", "群导出"))
+    @filter.command("导出", alias={"gexport"})
+    @filter.custom_filter(mentioned_command("导出", "gexport"))
     async def export_command(
         self,
         event: AstrMessageEvent,

@@ -35,7 +35,6 @@ class BlacklistEntry:
         reason: Why the user was blacklisted.
         operator: QQ number of the person who added the entry.
         created_at: Unix timestamp of the addition.
-        expires_at: Unix timestamp when the entry lapses, ``0`` for permanent.
         nickname: Best known display name at the time of addition.
     """
 
@@ -43,18 +42,7 @@ class BlacklistEntry:
     reason: str
     operator: str
     created_at: float
-    expires_at: float = 0.0
     nickname: str = ""
-
-    @property
-    def is_expired(self) -> bool:
-        """Whether the entry has passed its expiry time."""
-        return bool(self.expires_at) and time.time() >= self.expires_at
-
-    @property
-    def is_temporary(self) -> bool:
-        """Whether the entry is time limited rather than permanent."""
-        return bool(self.expires_at)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the entry for storage.
@@ -66,7 +54,6 @@ class BlacklistEntry:
             "reason": self.reason,
             "operator": self.operator,
             "created_at": self.created_at,
-            "expires_at": self.expires_at,
             "nickname": self.nickname,
         }
 
@@ -88,7 +75,6 @@ class BlacklistEntry:
             reason=str(raw.get("reason") or ""),
             operator=str(raw.get("operator") or ""),
             created_at=float(raw.get("created_at") or 0.0),
-            expires_at=float(raw.get("expires_at") or 0.0),
             nickname=str(raw.get("nickname") or ""),
         )
 
@@ -113,28 +99,28 @@ class BlacklistStore:
     # ------------------------------------------------------------------ #
 
     def is_blacklisted(self, scope: str, user_id: str) -> bool:
-        """Check whether a user is currently blacklisted.
-
-        Expired entries are pruned lazily on lookup.
+        """Check whether a user is blacklisted.
 
         Args:
             scope: Blacklist bucket, usually the group set name.
             user_id: QQ number to test.
 
         Returns:
-            ``True`` when an active entry exists.
+            ``True`` when an entry exists.
         """
         return self.get(scope, user_id) is not None
 
     def get(self, scope: str, user_id: str) -> BlacklistEntry | None:
-        """Fetch a user's entry, dropping it when expired.
+        """Fetch a user's entry.
+
+        An unreadable entry is dropped so a damaged record does not linger.
 
         Args:
             scope: Blacklist bucket.
             user_id: QQ number to look up.
 
         Returns:
-            The active entry, or ``None``.
+            The entry, or ``None``.
         """
         bucket = self._bucket(scope)
         raw = bucket.get(str(user_id))
@@ -146,17 +132,12 @@ class BlacklistStore:
             bucket.pop(str(user_id), None)
             self._store.save()
             return None
-
-        if entry.is_expired:
-            bucket.pop(str(user_id), None)
-            self._store.save()
-            return None
         return entry
 
     def list_entries(self, scope: str) -> list[BlacklistEntry]:
-        """List every active entry in a scope.
+        """List every entry in a scope.
 
-        Expired entries are pruned as a side effect.
+        Unreadable entries are pruned as a side effect.
 
         Args:
             scope: Blacklist bucket.
@@ -166,16 +147,16 @@ class BlacklistStore:
         """
         bucket = self._bucket(scope, create=False)
         entries: list[BlacklistEntry] = []
-        expired: list[str] = []
+        broken: list[str] = []
         for user_id, raw in bucket.items():
             entry = BlacklistEntry.from_dict(str(user_id), raw)
-            if entry is None or entry.is_expired:
-                expired.append(str(user_id))
+            if entry is None:
+                broken.append(str(user_id))
                 continue
             entries.append(entry)
 
-        if expired:
-            for user_id in expired:
+        if broken:
+            for user_id in broken:
                 bucket.pop(user_id, None)
             self._store.save()
 
@@ -183,13 +164,13 @@ class BlacklistStore:
         return entries
 
     def count(self, scope: str) -> int:
-        """Count active entries in a scope.
+        """Count entries in a scope.
 
         Args:
             scope: Blacklist bucket.
 
         Returns:
-            Number of active entries.
+            Number of entries.
         """
         return len(self.list_entries(scope))
 
@@ -204,7 +185,6 @@ class BlacklistStore:
         *,
         reason: str,
         operator: str,
-        duration: int = 0,
         nickname: str = "",
     ) -> BlacklistEntry:
         """Add or replace an entry.
@@ -214,19 +194,16 @@ class BlacklistStore:
             user_id: QQ number to blacklist.
             reason: Mandatory justification, already defaulted by the caller.
             operator: QQ number of the operator.
-            duration: Lifetime in seconds; ``0`` means permanent.
             nickname: Display name to remember.
 
         Returns:
             The stored entry.
         """
-        now = time.time()
         entry = BlacklistEntry(
             user_id=str(user_id),
             reason=str(reason or ""),
             operator=str(operator),
-            created_at=now,
-            expires_at=now + duration if duration > 0 else 0.0,
+            created_at=time.time(),
             nickname=str(nickname or ""),
         )
         self._bucket(scope)[str(user_id)] = entry.to_dict()

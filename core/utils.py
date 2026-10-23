@@ -72,20 +72,3 @@ def extract_reply_message_id(event: AstrMessageEvent) -> str | None:
             if message_id:
                 return message_id
     return None
-
-
-def shorten(text: str, limit: int = 20) -> str:
-    """Trim ``text`` for inclusion in log lines and receipts.
-
-    Args:
-        text: Arbitrary user supplied text.
-        limit: Maximum number of characters to keep.
-
-    Returns:
-        The original text when short enough, otherwise a truncated version
-        suffixed with an ellipsis.
-    """
-    clean = str(text or "").replace("\n", " ").strip()
-    if len(clean) <= limit:
-        return clean
-    return clean[:limit] + "…"

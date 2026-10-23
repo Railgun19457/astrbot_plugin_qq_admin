@@ -94,7 +94,6 @@ class PermissionSettings:
         allow_group_admin: Whether group owners/admins may manage groups.
         allow_member_command: Whether plain members may use ``any`` commands.
         capability_levels: ``capability -> required level``.
-        group_privileged_roles: Roles treated as group administrators.
     """
 
     custom_allowlist: frozenset[str]

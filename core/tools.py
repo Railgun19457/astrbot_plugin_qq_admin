@@ -649,7 +649,6 @@ class QqBlacklistAddTool(_PluginTool):
             target,
             reason=final_reason,
             operator=str(event.get_sender_id() or ""),
-            duration=0,
             nickname=name,
         )
 
@@ -667,7 +666,6 @@ class QqBlacklistAddTool(_PluginTool):
             target_name=name,
             target_id=target,
             reason=final_reason,
-            duration="永久",
         )
         kick_mode = str(blacklist_policy["kick_on_add"] or "none")
         if kick_mode == "none":
@@ -794,8 +792,8 @@ class QqBlacklistQueryTool(_PluginTool):
             return render_template(plugin.templates, "blacklist_empty", scope=scope)
 
         lines = [
-            f"{index}. {entry.nickname or entry.user_id}({entry.user_id}) | "
-            f"{entry.reason} | {'永久' if not entry.is_temporary else format_duration(int(entry.expires_at - entry.created_at))}"
+            f"{index}. {entry.nickname or entry.user_id}({entry.user_id})"
+            f" · {entry.reason}"
             for index, entry in enumerate(entries, start=1)
         ]
         return f"黑名单（{scope}）共 {len(entries)} 人：\n" + "\n".join(lines)

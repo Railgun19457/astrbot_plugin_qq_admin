@@ -184,13 +184,13 @@ class Exporter:
 
         Args:
             scope: Blacklist bucket name (usually the group set name).
-            entries: Active entries to export.
+            entries: Entries to export.
             group_ids: Groups sharing this bucket, listed in the sheet note.
 
         Returns:
             The export outcome.
         """
-        headers = ["QQ号", "昵称", "拉黑原因", "操作人", "拉黑时间", "到期时间"]
+        headers = ["QQ号", "昵称", "拉黑原因", "操作人", "拉黑时间"]
         data: list[list[Any]] = []
         for entry in entries:
             data.append(
@@ -200,9 +200,6 @@ class Exporter:
                     entry.reason,
                     entry.operator,
                     _format_timestamp(entry.created_at),
-                    _format_timestamp(entry.expires_at)
-                    if entry.is_temporary
-                    else "永久",
                 ],
             )
 

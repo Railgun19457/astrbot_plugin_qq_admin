@@ -9,7 +9,7 @@ any scheduled follow-up (the whole-group mute timer) when the user declines.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
@@ -29,13 +29,11 @@ class PendingAction:
 
     Attributes:
         summary: Short description shown in the confirmation prompt.
-        payload: Arbitrary data the caller needs to execute the action.
         capability: Capability key used for the permission check, so the
             confirmer must be authorised too.
     """
 
     summary: str
-    payload: dict[str, Any] = field(default_factory=dict)
     capability: str = ""
 
 

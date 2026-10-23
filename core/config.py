@@ -34,18 +34,6 @@ REVIEW_QUESTION_TYPES: tuple[str, ...] = ("any", "add", "invite")
 #: Actions taken when no review rule matched the applicant.
 REVIEW_DEFAULT_ACTIONS: tuple[str, ...] = ("hold", "approve", "reject")
 
-#: Built-in join review policy of a group set.
-DEFAULT_REVIEW_POLICY: dict[str, Any] = {
-    "enabled": False,
-    "blacklist_reject": True,
-    "keyword_allow": True,
-    "keywords": [],
-    "question_type": "any",
-    "min_account_level": 0,
-    "default_action": "hold",
-    "reject_reason": DEFAULT_REVIEW_REJECT_REASON,
-}
-
 #: How a blacklisted member is removed from groups.
 KICK_MODES: tuple[str, ...] = ("none", "current", "all")
 
@@ -105,12 +93,6 @@ NOTIFY_RECEIPT_CATEGORIES: tuple[str, ...] = (
     NOTIFY_CATEGORY_RECALL,
     NOTIFY_CATEGORY_BLACKLIST,
     NOTIFY_CATEGORY_EXPORT,
-)
-
-#: Every routable category, in the order the WebUI offers them.
-NOTIFY_CATEGORIES: tuple[str, ...] = (
-    *NOTIFY_RECEIPT_CATEGORIES,
-    NOTIFY_CATEGORY_REVIEW_NOTICE,
 )
 
 #: Destinations of the join review notice.
@@ -533,14 +515,11 @@ def normalize_kick_mode(value: Any) -> str:
     """Normalize the ``blacklist.kick_on_add`` setting.
 
     Args:
-        value: Raw configuration value. ``True``/``False`` are accepted so a
-            configuration written before the mode existed keeps working.
+        value: Raw configuration value.
 
     Returns:
         One of :data:`KICK_MODES`.
     """
-    if isinstance(value, bool):
-        return "current" if value else "none"
     text = str(value or "").strip().lower()
     return text if text in KICK_MODES else "none"
 
@@ -700,19 +679,6 @@ def normalize_group_entry(raw: Any) -> dict[str, Any] | None:
         "group_id": group_id,
         "label": label,
     }
-
-
-def group_umo(group_id: str, platform_id: str = "") -> str:
-    """Build the UMO of a group.
-
-    Args:
-        group_id: QQ group id.
-        platform_id: Platform instance id, empty for "any instance".
-
-    Returns:
-        The group's ``unified_msg_origin``.
-    """
-    return f"{platform_id or ANY_PLATFORM}:{GROUP_MESSAGE_TYPE}:{group_id}"
 
 
 def find_group_set(
@@ -891,12 +857,10 @@ def normalize_notify_routes(raw: Any) -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
 
     mirror = [
-        # ``群导出`` was renamed to ``导出``; the old value is accepted so an
-        # existing configuration keeps working.
-        "导出" if item == "群导出" else str(item)
+        str(item)
         for item in normalize_id_list(source.get("receipt_to_manage_session"))
+        if item in NOTIFY_RECEIPT_CATEGORIES
     ]
-    mirror = [item for item in mirror if item in NOTIFY_RECEIPT_CATEGORIES]
 
     review_target = str(source.get("review_notice_target") or "").strip().lower()
     if review_target not in NOTIFY_REVIEW_TARGETS:

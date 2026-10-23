@@ -93,7 +93,7 @@
                 "default": "none"
               }
             },
-            "hint": "组内所有群共享同一份黑名单；拉黑是永久的，需要时用 /解除拉黑 移出"
+            "hint": "组内所有群共享同一份黑名单；拉黑是永久的，需要时用「解除拉黑」移出"
           },
           "join_review": {
             "type": "object",
@@ -390,7 +390,7 @@
       "max_members": {
         "type": "int",
         "description": "成员名单导出行数上限",
-        "hint": "超大群导出会很慢且文件很大，超出部分会被截断并在表格中标注",
+        "hint": "群成员很多时导出会很慢且文件很大，超出部分会被截断并在表格中标注",
         "default": 3000
       },
       "cleanup_hours": {
@@ -400,7 +400,7 @@
         "default": 24
       }
     },
-    "hint": "导出结果生成 xlsx，可上传到群文件；本地文件按保存时长自动清理"
+    "hint": "生成 xlsx 表格并上传到群文件；本地文件按保存时长自动清理"
   },
   "notify": {
     "type": "object",
@@ -517,8 +517,8 @@
       "blacklist_added": {
         "type": "text",
         "description": "拉黑成功",
-        "hint": "可用占位符：{target_name} {target_id} {reason} {duration}（拉黑为永久，{duration} 固定显示「永久」）",
-        "default": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}\n期限：{duration}"
+        "hint": "可用占位符：{target_name} {target_id} {reason}",
+        "default": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}"
       },
       "blacklist_removed": {
         "type": "text",
@@ -617,12 +617,6 @@
         "hint": "可用占位符：{selector}",
         "default": "未找到群组：{selector}"
       },
-      "notification_settings": {
-        "type": "text",
-        "description": "通知设置提示",
-        "hint": "群内 /群管状态 末尾的提示",
-        "default": "在管理会话发送「黑名单 通知设置 [群号或群组名]」可查看该群组的通知路由"
-      },
       "member_list_failed": {
         "type": "text",
         "description": "获取群成员失败",
@@ -669,7 +663,7 @@
         "type": "text",
         "description": "需要指定目标群",
         "hint": "可用占位符：{groups}",
-        "default": "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：#123456；可用：{groups}"
+        "default": "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：禁言 #123456 @某人；可用：{groups}"
       },
       "kick_failed_in": {
         "type": "text",
