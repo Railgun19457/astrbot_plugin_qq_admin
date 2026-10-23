@@ -2873,36 +2873,32 @@ class QQAdminPlugin(Star):
             scope.append(current_group)
         return scope
 
-    def _tool_group_id(
+    def _tool_group_ids(
         self,
         event: AstrMessageEvent,
         selector: str = "",
-    ) -> str:
-        """Resolve the group a tool call operates on.
+    ) -> list[str]:
+        """Resolve the groups a tool call acts on.
 
-        Inside a managed group that is the current group. A manage session has
-        no group of its own, so the target comes from the model supplied
-        ``selector``; it is only accepted when it names one of the groups the
-        session manages, so a model steered by a crafted message still cannot
-        reach another group. The selector may be omitted inside a managed group
-        (the current group is used) or when the session reaches exactly one
-        group.
+        A selector names exactly one group and is only accepted when it is part
+        of the session's scope, so a model steered by a crafted message cannot
+        reach another group. Without a selector the call covers every group in
+        scope, which lets a manage session operate on all of its groups at once
+        instead of forcing the model to pick one.
 
         Args:
             event: The tool call event.
             selector: Group number supplied by the model, possibly empty.
 
         Returns:
-            The group id, or an empty string when it cannot be resolved within
-            the session's scope.
+            The groups to act on, or an empty list when the selector is outside
+            the session's scope or the session manages nothing.
         """
         scope = self._tool_group_scope(event)
         text = str(selector or "").strip().lstrip("#")
         if text:
-            return text if text in scope else ""
-        if self._group_set_for(event) is not None:
-            return str(event.get_group_id() or "")
-        return scope[0] if len(scope) == 1 else ""
+            return [text] if text in scope else []
+        return scope
 
     def _extract_targets(self, event: AstrMessageEvent) -> list[str]:
         """Extract ``@`` targets from an event.

@@ -2,13 +2,17 @@
 
 Security model
 --------------
-Two rules shape every tool here:
+Three rules shape every tool here:
 
-1. **The chat a tool acts on comes from the session, not from the model.**
-   Inside a group that is always the current group. A manage session may name
-   one of its own groups through the ``group_id`` parameter, and the value is
-   rejected unless it is part of that session's scope, so a model steered by a
-   crafted message cannot reach into a different group.
+1. **The set of groups a tool acts on comes from the session, not from the
+   model.** Inside a group that is always the current group. A manage session
+   covers every group it manages, and the model may narrow that to one of them
+   with the ``group_id`` parameter; any value outside the session's scope is
+   rejected, so a model steered by a crafted message cannot reach into a
+   different group.
+2. **Tools that share their state per group set never take a group.**
+   ``qq_blacklist_*`` act on every set the session can see, mirroring the
+   ``/拉黑`` family, because the blacklist is shared by a whole set.
 2. **Tool-level permission checks are mandatory.** AstrBot's
    ``FunctionToolManager._default_permission`` returns ``"member"`` for every
    non-builtin tool, i.e. the framework gate does not restrict these tools at
@@ -81,25 +85,47 @@ def _failed(plugin: QQAdminPlugin, error: str, *, unsupported: bool = False) -> 
     return "error: " + render_template(plugin.templates, "api_failed", error=error)
 
 
-def _no_group(plugin: QQAdminPlugin, event: AstrMessageEvent) -> str:
+def _no_group(
+    plugin: QQAdminPlugin,
+    event: AstrMessageEvent,
+    selector: str = "",
+) -> str:
     """Message returned when a tool cannot resolve a target group.
-
-    The refusal names the groups the session may act on, so the model can retry
-    with an explicit ``group_id`` instead of guessing.
 
     Args:
         plugin: Plugin instance supplying the session scope.
         event: The tool call event.
+        selector: The rejected selector, empty when nothing was selected.
 
     Returns:
         The refusal text.
     """
-    scope = plugin._tool_group_scope(event)
-    if len(scope) > 1:
-        return "error: 当前会话对应多个群，请在 group_id 中指定其中一个：" + "、".join(
-            scope
+    text = str(selector or "").strip().lstrip("#")
+    if text:
+        scope = plugin._tool_group_scope(event)
+        reachable = (
+            f"可管理的群：{'、'.join(scope)}" if scope else "当前会话没有可管理的群"
         )
+        return f"error: 群 {text} 不在当前会话的可管理范围内。{reachable}"
     return "error: 当前会话不在已配置的群组中"
+
+
+def _grouped(group_ids: list[str], results: list[str]) -> str:
+    """Render one result per group, tagged with the group number.
+
+    A single group keeps the plain message so the common case stays readable;
+    several groups are prefixed so the model can tell which one failed.
+
+    Args:
+        group_ids: Groups the results belong to, in order.
+        results: One message per group.
+
+    Returns:
+        The joined text.
+    """
+    if len(group_ids) == 1:
+        return results[0] if results else ""
+    return "\n".join(f"【{group}】{text}" for group, text in zip(group_ids, results))
 
 
 def _format_notice_time(value: Any) -> str:
@@ -208,7 +234,8 @@ class QqBanMemberTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
                 "user_id": {
                     "type": "string",
@@ -236,16 +263,16 @@ class QqBanMemberTool(_PluginTool):
             event: The tool call event.
             duration_seconds: Mute duration; ``0`` lifts an existing mute.
             user_id: Target QQ number, optional.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
 
         capability = "ban"
         allowed, deny = await plugin._tool_permission(event, capability)
@@ -262,41 +289,52 @@ class QqBanMemberTool(_PluginTool):
             # unusable value is refused instead.
             return "error: duration_seconds 必须是整数秒数，0 表示解禁"
         duration = max(0, raw_duration)
-        result = await plugin.client.set_group_ban(event, group_id, target, duration)
-        name = await plugin._resolve_member_name(event, group_id, target)
-        if not result.ok:
+        action = "unban" if duration == 0 else "ban"
+
+        results: list[str] = []
+        for current_group in group_ids:
+            result = await plugin.client.set_group_ban(
+                event,
+                current_group,
+                target,
+                duration,
+            )
             plugin._tool_audit(
-                "ban" if duration else "unban",
+                action,
                 event,
                 target=target,
-                group_id=group_id,
-                result="failed",
+                group_id=current_group,
+                result="ok" if result.ok else "failed",
                 error=result.error,
+                duration=duration,
             )
-            return _failed(plugin, result.error, unsupported=result.unsupported)
+            if not result.ok:
+                results.append(
+                    _failed(plugin, result.error, unsupported=result.unsupported),
+                )
+                continue
 
-        action = "unban" if duration == 0 else "ban"
-        plugin._tool_audit(
-            action,
-            event,
-            target=target,
-            group_id=group_id,
-            duration=duration,
-        )
-        if duration == 0:
-            return render_template(
-                plugin.templates,
-                "unban_success",
-                target_name=name,
-                target_id=target,
-            )
-        return render_template(
-            plugin.templates,
-            "ban_success",
-            target_name=name,
-            target_id=target,
-            duration=format_duration(duration),
-        )
+            name = await plugin._resolve_member_name(event, current_group, target)
+            if duration == 0:
+                results.append(
+                    render_template(
+                        plugin.templates,
+                        "unban_success",
+                        target_name=name,
+                        target_id=target,
+                    ),
+                )
+            else:
+                results.append(
+                    render_template(
+                        plugin.templates,
+                        "ban_success",
+                        target_name=name,
+                        target_id=target,
+                        duration=format_duration(duration),
+                    ),
+                )
+        return _grouped(group_ids, results)
 
 
 @dataclass
@@ -314,7 +352,8 @@ class QqWholeBanTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
                 "enabled": {"type": "boolean", "description": "true 开启，false 解除"},
                 "duration_seconds": {
@@ -347,16 +386,16 @@ class QqWholeBanTool(_PluginTool):
             duration_seconds: When enabling, seconds until the mute is lifted
                 automatically; ``0`` keeps it until lifted manually.
             confirm: Must be ``True`` to actually act.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
 
         allowed, deny = await plugin._tool_permission(event, "whole_ban")
         if not allowed:
@@ -371,47 +410,54 @@ class QqWholeBanTool(_PluginTool):
             action_label += f"（{format_duration(duration)} 后自动解除）"
         if not confirm:
             return (
-                f"待确认：{action_label}。请先向用户确认，用户同意后"
-                "再次调用本工具并把 confirm 设为 true。"
+                f"待确认：将在此次涉及的 {len(group_ids)} 个群{action_label}。"
+                "请先向用户确认，用户同意后再次调用本工具并把 confirm 设为 true。"
             )
 
-        result = await plugin.client.set_group_whole_ban(
-            event, group_id, enabled=enabled
-        )
-        if not result.ok:
+        action = "whole_ban" if enabled else "whole_ban_off"
+        results: list[str] = []
+        for current_group in group_ids:
+            result = await plugin.client.set_group_whole_ban(
+                event,
+                current_group,
+                enabled=enabled,
+            )
             plugin._tool_audit(
-                "whole_ban" if enabled else "whole_ban_off",
+                action,
                 event,
-                group_id=group_id,
-                result="failed",
+                group_id=current_group,
+                result="ok" if result.ok else "failed",
                 error=result.error,
+                duration=duration,
             )
-            return _failed(plugin, result.error, unsupported=result.unsupported)
+            if not result.ok:
+                results.append(
+                    _failed(plugin, result.error, unsupported=result.unsupported),
+                )
+                continue
 
-        plugin._tool_audit(
-            "whole_ban" if enabled else "whole_ban_off",
-            event,
-            group_id=group_id,
-            duration=duration,
-        )
-
-        if not enabled:
-            plugin._cancel_whole_ban_timer(group_id)
-            return render_template(plugin.templates, "whole_ban_off")
-
-        if duration:
-            plugin._schedule_whole_ban_off(
-                event,
-                group_id,
-                duration,
-                operator=str(event.get_sender_id() or ""),
-            )
-            return render_template(
-                plugin.templates,
-                "whole_ban_timed",
-                duration=format_duration(duration),
-            )
-        return render_template(plugin.templates, "whole_ban_on")
+            if not enabled:
+                plugin._cancel_whole_ban_timer(current_group)
+                results.append(
+                    render_template(plugin.templates, "whole_ban_off"),
+                )
+            elif duration:
+                plugin._schedule_whole_ban_off(
+                    event,
+                    current_group,
+                    duration,
+                    operator=str(event.get_sender_id() or ""),
+                )
+                results.append(
+                    render_template(
+                        plugin.templates,
+                        "whole_ban_timed",
+                        duration=format_duration(duration),
+                    ),
+                )
+            else:
+                results.append(render_template(plugin.templates, "whole_ban_on"))
+        return _grouped(group_ids, results)
 
 
 @dataclass
@@ -428,7 +474,8 @@ class QqKickMemberTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
                 "reject_add": {
@@ -459,16 +506,16 @@ class QqKickMemberTool(_PluginTool):
             user_id: Target QQ number, optional.
             reject_add: Also reject future join requests.
             confirm: Must be ``True`` to actually act.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
 
         allowed, deny = await plugin._tool_permission(event, "kick")
         if not allowed:
@@ -478,43 +525,47 @@ class QqKickMemberTool(_PluginTool):
         if error:
             return error
 
-        name = await plugin._resolve_member_name(event, group_id, target)
+        preview = await plugin._resolve_member_name(event, group_ids[0], target)
         if not confirm:
+            where = "本群" if len(group_ids) == 1 else f"以下 {len(group_ids)} 个群"
             return (
-                f"待确认：将 {name}({target}) 移出本群。"
+                f"待确认：将 {preview}({target}) 移出{where}。"
                 "请先向用户确认，用户同意后再次调用本工具并把 confirm 设为 true。"
             )
 
-        result = await plugin.client.set_group_kick(
-            event,
-            group_id,
-            target,
-            reject_add_request=bool(reject_add),
-        )
-        if not result.ok:
+        results: list[str] = []
+        for current_group in group_ids:
+            result = await plugin.client.set_group_kick(
+                event,
+                current_group,
+                target,
+                reject_add_request=bool(reject_add),
+            )
             plugin._tool_audit(
                 "kick",
                 event,
                 target=target,
-                group_id=group_id,
-                result="failed",
+                group_id=current_group,
+                result="ok" if result.ok else "failed",
                 error=result.error,
+                reject_add=bool(reject_add),
             )
-            return _failed(plugin, result.error, unsupported=result.unsupported)
+            if not result.ok:
+                results.append(
+                    _failed(plugin, result.error, unsupported=result.unsupported),
+                )
+                continue
 
-        plugin._tool_audit(
-            "kick",
-            event,
-            target=target,
-            group_id=group_id,
-            reject_add=bool(reject_add),
-        )
-        return render_template(
-            plugin.templates,
-            "kick_success",
-            target_name=name,
-            target_id=target,
-        )
+            name = await plugin._resolve_member_name(event, current_group, target)
+            results.append(
+                render_template(
+                    plugin.templates,
+                    "kick_success",
+                    target_name=name,
+                    target_id=target,
+                ),
+            )
+        return _grouped(group_ids, results)
 
 
 @dataclass
@@ -532,7 +583,8 @@ class QqSendGroupNoticeTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
                 "content": {"type": "string", "description": "公告正文"},
                 "image": {
@@ -563,16 +615,16 @@ class QqSendGroupNoticeTool(_PluginTool):
             content: Notice body.
             image: Optional image path or URL.
             confirm: Must be ``True`` to actually publish.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
         if not str(content or "").strip():
             return "error: 公告内容不能为空"
 
@@ -582,35 +634,36 @@ class QqSendGroupNoticeTool(_PluginTool):
 
         if not confirm:
             extra = f"（含配图 {image}）" if str(image or "").strip() else ""
+            where = "本群" if len(group_ids) == 1 else f"以下 {len(group_ids)} 个群"
             return (
-                f"待确认：发布群公告「{content[:50]}」{extra}。"
+                f"待确认：向{where}发布群公告「{content[:50]}」{extra}。"
                 "公告全群可见，请先向用户确认，同意后再把 confirm 设为 true 调用。"
             )
 
-        result = await plugin.client.send_group_notice(
-            event,
-            group_id,
-            content,
-            image,
-        )
-        if not result.ok:
+        results: list[str] = []
+        for current_group in group_ids:
+            result = await plugin.client.send_group_notice(
+                event,
+                current_group,
+                content,
+                image,
+            )
             plugin._tool_audit(
                 "notice",
                 event,
-                group_id=group_id,
-                result="failed",
+                group_id=current_group,
+                result="ok" if result.ok else "failed",
                 error=result.error,
+                content=content[:50],
+                with_image=bool(str(image or "").strip()),
             )
-            return _failed(plugin, result.error, unsupported=result.unsupported)
-
-        plugin._tool_audit(
-            "notice",
-            event,
-            group_id=group_id,
-            content=content[:50],
-            with_image=bool(str(image or "").strip()),
-        )
-        return render_template(plugin.templates, "notice_success")
+            if not result.ok:
+                results.append(
+                    _failed(plugin, result.error, unsupported=result.unsupported),
+                )
+                continue
+            results.append(render_template(plugin.templates, "notice_success"))
+        return _grouped(group_ids, results)
 
 
 @dataclass
@@ -627,7 +680,8 @@ class QqGroupNoticeQueryTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
             },
             "required": [],
@@ -643,40 +697,46 @@ class QqGroupNoticeQueryTool(_PluginTool):
 
         Args:
             event: The tool call event.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
 
         allowed, deny = await plugin._tool_permission(event, "notice")
         if not allowed:
             return _denied(plugin, deny)
 
-        notices = await plugin.client.get_group_notice(event, group_id)
-        if not notices:
-            return "当前没有群公告，或协议端不支持读取公告（需 NapCat / Lagrange）"
+        results: list[str] = []
+        for current_group in group_ids:
+            notices = await plugin.client.get_group_notice(event, current_group)
+            if not notices:
+                results.append(
+                    "当前没有群公告，或协议端不支持读取公告（需 NapCat / Lagrange）",
+                )
+                continue
 
-        lines = [f"共 {len(notices)} 条群公告（编号用于删除）："]
-        for index, notice in enumerate(notices, start=1):
-            body = notice.get("message")
-            text = ""
-            if isinstance(body, dict):
-                text = str(body.get("text") or "")
-            elif isinstance(body, str):
-                text = body
-            text = text.replace("\n", " ").strip() or "（无正文）"
-            lines.append(
-                f"{index}. #{notice.get('notice_id') or '未知'} "
-                f"{text[:80]} · 发布者 {notice.get('sender_id') or '未知'}"
-                f" · {_format_notice_time(notice.get('publish_time'))}",
-            )
-        return "\n".join(lines)
+            lines = [f"共 {len(notices)} 条群公告（编号用于删除）："]
+            for index, notice in enumerate(notices, start=1):
+                body = notice.get("message")
+                text = ""
+                if isinstance(body, dict):
+                    text = str(body.get("text") or "")
+                elif isinstance(body, str):
+                    text = body
+                text = text.replace("\n", " ").strip() or "（无正文）"
+                lines.append(
+                    f"{index}. #{notice.get('notice_id') or '未知'} "
+                    f"{text[:80]} · 发布者 {notice.get('sender_id') or '未知'}"
+                    f" · {_format_notice_time(notice.get('publish_time'))}",
+                )
+            results.append("\n".join(lines))
+        return _grouped(group_ids, results)
 
 
 @dataclass
@@ -693,7 +753,8 @@ class QqGroupNoticeDeleteTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
                 "notice_id": {"type": "string", "description": "公告编号"},
                 "confirm": {
@@ -718,16 +779,16 @@ class QqGroupNoticeDeleteTool(_PluginTool):
             event: The tool call event.
             notice_id: Identifier from :class:`QqGroupNoticeQueryTool`.
             confirm: Must be ``True`` to actually delete.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
         target = str(notice_id or "").strip()
         if not target:
             return "error: 缺少 notice_id"
@@ -737,30 +798,32 @@ class QqGroupNoticeDeleteTool(_PluginTool):
             return _denied(plugin, deny)
 
         if not confirm:
+            where = "本群" if len(group_ids) == 1 else f"以下 {len(group_ids)} 个群"
             return (
-                f"待确认：删除群公告 #{target}。"
+                f"待确认：删除{where}的群公告 #{target}。"
                 "请先向用户确认，同意后再把 confirm 设为 true 调用。"
             )
 
-        result = await plugin.client.delete_group_notice(event, group_id, target)
-        if not result.ok:
+        results: list[str] = []
+        for current_group in group_ids:
+            result = await plugin.client.delete_group_notice(
+                event, current_group, target
+            )
             plugin._tool_audit(
                 "notice_delete",
                 event,
-                group_id=group_id,
-                result="failed",
+                group_id=current_group,
+                result="ok" if result.ok else "failed",
                 error=result.error,
                 notice_id=target,
             )
-            return _failed(plugin, result.error, unsupported=result.unsupported)
-
-        plugin._tool_audit(
-            "notice_delete",
-            event,
-            group_id=group_id,
-            notice_id=target,
-        )
-        return render_template(plugin.templates, "notice_deleted")
+            if not result.ok:
+                results.append(
+                    _failed(plugin, result.error, unsupported=result.unsupported),
+                )
+                continue
+            results.append(render_template(plugin.templates, "notice_deleted"))
+        return _grouped(group_ids, results)
 
 
 @dataclass
@@ -769,17 +832,14 @@ class QqBlacklistAddTool(_PluginTool):
 
     name: str = "qq_blacklist_add"
     description: str = (
-        "将成员永久加入本群组的共享黑名单。reason 是必填的拉黑原因，会记录并出现在导出表格中。"
+        "将成员永久加入本群组（管理会话中为它管理的全部群组）的共享黑名单。"
+        "reason 是必填的拉黑原因，会记录并出现在导出表格中。"
         "拉黑不会自动解除，也不会自动踢出成员；需要时用 qq_blacklist_remove 移出。"
     )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
-                "group_id": {
-                    "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
-                },
                 "reason": {"type": "string", "description": "拉黑原因，必填"},
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
             },
@@ -792,57 +852,66 @@ class QqBlacklistAddTool(_PluginTool):
         event: AstrMessageEvent,
         reason: str,
         user_id: str = "",
-        group_id: str = "",
     ) -> str:
         """Execute the blacklisting.
+
+        The blacklist is shared by a whole group set, so the entry never depends
+        on one group: it is written to every set this session can see, matching
+        the ``/拉黑`` command.
 
         Args:
             event: The tool call event.
             reason: Why the user is blacklisted.
             user_id: Target QQ number, optional.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
+        group_ids = plugin._tool_group_ids(event, "")
+        if not group_ids:
             return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "blacklist")
         if not allowed:
             return _denied(plugin, deny)
 
-        blacklist_policy = plugin._policy(group_id, umo=_umo(event))["blacklist"]
-        if not blacklist_policy["enabled"]:
+        group_sets = [
+            item
+            for item in plugin._visible_group_sets(event)
+            if item["blacklist"]["enabled"]
+        ]
+        if not group_sets:
             return "error: " + render_template(plugin.templates, "blacklist_disabled")
 
         target, error = await self.resolve_target(event, user_id)
         if error:
             return error
 
-        final_reason = str(reason or "").strip() or blacklist_policy["default_reason"]
-        scope = plugin._scope(group_id, umo=_umo(event))
-        name = await plugin._resolve_member_name(event, group_id, target)
-        plugin.blacklist.add(
-            scope,
-            target,
-            reason=final_reason,
-            operator=str(event.get_sender_id() or ""),
-            nickname=name,
-            group_id=group_id,
+        origin = group_ids[0]
+        final_reason = (
+            str(reason or "").strip() or group_sets[0]["blacklist"]["default_reason"]
         )
+        name = await plugin._resolve_member_name(event, origin, target)
+        for group_set in group_sets:
+            scope = str(group_set["name"])
+            plugin.blacklist.add(
+                scope,
+                target,
+                reason=final_reason,
+                operator=str(event.get_sender_id() or ""),
+                nickname=name,
+                group_id=origin,
+            )
+            plugin._tool_audit(
+                "blacklist_add",
+                event,
+                target=target,
+                group_id=origin,
+                scope=scope,
+                reason=final_reason,
+            )
 
-        plugin._tool_audit(
-            "blacklist_add",
-            event,
-            target=target,
-            group_id=group_id,
-            scope=scope,
-            reason=final_reason,
-        )
         text = render_template(
             plugin.templates,
             "blacklist_added",
@@ -850,6 +919,12 @@ class QqBlacklistAddTool(_PluginTool):
             target_id=target,
             reason=final_reason,
         )
+        if len(group_sets) > 1:
+            text += "\n" + render_template(
+                plugin.templates,
+                "blacklist_scopes",
+                scopes="、".join(str(item["name"]) for item in group_sets),
+            )
         return text
 
 
@@ -858,15 +933,11 @@ class QqBlacklistRemoveTool(_PluginTool):
     """Remove a member from the blacklist."""
 
     name: str = "qq_blacklist_remove"
-    description: str = "将成员移出本群组的共享黑名单。"
+    description: str = "将成员移出本群组（管理会话中为它管理的全部群组）的共享黑名单。"
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
-                "group_id": {
-                    "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
-                },
                 "user_id": {"type": "string", "description": "目标 QQ 号，可省略"},
             },
             "required": [],
@@ -877,22 +948,22 @@ class QqBlacklistRemoveTool(_PluginTool):
         self,
         event: AstrMessageEvent,
         user_id: str = "",
-        group_id: str = "",
     ) -> str:
         """Execute the removal.
+
+        The entry is deleted from every set this session can see, matching the
+        ``/解除拉黑`` command, so no group has to be named.
 
         Args:
             event: The tool call event.
             user_id: Target QQ number, optional.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
 
         Returns:
             A human readable result or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
+        group_ids = plugin._tool_group_ids(event, "")
+        if not group_ids:
             return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "blacklist")
@@ -903,23 +974,32 @@ class QqBlacklistRemoveTool(_PluginTool):
         if error:
             return error
 
-        scope = plugin._scope(group_id, umo=_umo(event))
-        name = await plugin._resolve_member_name(event, group_id, target)
-        if not plugin.blacklist.remove(scope, target):
+        group_sets = plugin._visible_group_sets(event)
+        if not group_sets:
+            return _no_group(plugin, event)
+
+        origin = group_ids[0]
+        name = await plugin._resolve_member_name(event, origin, target)
+        hit = False
+        for group_set in group_sets:
+            scope = str(group_set["name"])
+            if not plugin.blacklist.remove(scope, target):
+                continue
+            hit = True
+            plugin._tool_audit(
+                "blacklist_remove",
+                event,
+                target=target,
+                group_id=origin,
+                scope=scope,
+            )
+        if not hit:
             return render_template(
                 plugin.templates,
                 "blacklist_not_found",
                 target_name=name,
                 target_id=target,
             )
-
-        plugin._tool_audit(
-            "blacklist_remove",
-            event,
-            target=target,
-            group_id=group_id,
-            scope=scope,
-        )
         return render_template(
             plugin.templates,
             "blacklist_removed",
@@ -933,58 +1013,65 @@ class QqBlacklistQueryTool(_PluginTool):
     """List the shared blacklist."""
 
     name: str = "qq_blacklist_query"
-    description: str = "查询本群组共享的黑名单，包含拉黑原因。"
+    description: str = (
+        "查询本群组（管理会话中为它管理的全部群组）共享的黑名单，包含拉黑原因。"
+    )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
-            "properties": {
-                "group_id": {
-                    "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
-                },
-            },
+            "properties": {},
             "required": [],
         },
     )
 
-    async def run(
-        self,
-        event: AstrMessageEvent,
-        group_id: str = "",
-    ) -> str:
+    async def run(self, event: AstrMessageEvent) -> str:
         """Return the blacklist as plain text.
 
         Args:
             event: The tool call event.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
 
         Returns:
             The formatted list or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
+        if not plugin._tool_group_ids(event, ""):
             return _no_group(plugin, event)
 
         allowed, deny = await plugin._tool_permission(event, "query")
         if not allowed:
             return _denied(plugin, deny)
 
-        if not plugin._policy(group_id, umo=_umo(event))["blacklist"]["enabled"]:
-            return "error: " + render_template(plugin.templates, "blacklist_disabled")
+        group_sets = plugin._visible_group_sets(event)
+        if not group_sets:
+            return _no_group(plugin, event)
 
-        scope = plugin._scope(group_id, umo=_umo(event))
-        entries = plugin.blacklist.list_entries(scope)
-        if not entries:
-            return render_template(plugin.templates, "blacklist_empty", scope=scope)
-
-        lines = [
-            f"{index}. {entry.nickname or entry.user_id}({entry.user_id})"
-            f" · {entry.reason}"
-            for index, entry in enumerate(entries, start=1)
-        ]
-        return f"黑名单（{scope}）共 {len(entries)} 人：\n" + "\n".join(lines)
+        blocks: list[str] = []
+        for group_set in group_sets:
+            scope = str(group_set["name"])
+            if not group_set["blacklist"]["enabled"]:
+                blocks.append(
+                    render_template(
+                        plugin.templates,
+                        "blacklist_disabled_full",
+                        scope=scope,
+                    ),
+                )
+                continue
+            entries = plugin.blacklist.list_entries(scope)
+            if not entries:
+                blocks.append(
+                    render_template(plugin.templates, "blacklist_empty", scope=scope),
+                )
+                continue
+            lines = [
+                f"{index}. {entry.nickname or entry.user_id}({entry.user_id})"
+                f" · {entry.reason}"
+                for index, entry in enumerate(entries, start=1)
+            ]
+            blocks.append(
+                f"黑名单（{scope}）共 {len(entries)} 人：\n" + "\n".join(lines)
+            )
+        return _grouped([str(item["name"]) for item in group_sets], blocks)
 
 
 @dataclass
@@ -999,7 +1086,8 @@ class QqGroupInfoTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
             },
             "required": [],
@@ -1015,40 +1103,43 @@ class QqGroupInfoTool(_PluginTool):
 
         Args:
             event: The tool call event.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             The formatted information or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
 
         allowed, deny = await plugin._tool_permission(event, "query")
         if not allowed:
             return _denied(plugin, deny)
 
-        info = await plugin.client.get_group_info(event, group_id)
-        members = await plugin.client.get_group_member_list(event, group_id)
-        owner = next(
-            (m for m in members if str(m.get("role")) == "owner"),
-            None,
-        )
-        lines = [
-            f"群号：{group_id}",
-            f"群名：{(info or {}).get('group_name') or '未知'}",
-            f"成员数：{len(members)}",
-        ]
-        if owner:
-            lines.append(
-                f"群主：{owner.get('nickname') or owner.get('user_id')}"
-                f"({owner.get('user_id')})",
+        results: list[str] = []
+        for current_group in group_ids:
+            info = await plugin.client.get_group_info(event, current_group)
+            members = await plugin.client.get_group_member_list(event, current_group)
+            owner = next(
+                (m for m in members if str(m.get("role")) == "owner"),
+                None,
             )
-        group_set = plugin._group_set_name(group_id, umo=_umo(event))
-        lines.append(f"所属群组：{group_set or '未加入任何群组'}")
-        return "\n".join(lines)
+            lines = [
+                f"群号：{current_group}",
+                f"群名：{(info or {}).get('group_name') or '未知'}",
+                f"成员数：{len(members)}",
+            ]
+            if owner:
+                lines.append(
+                    f"群主：{owner.get('nickname') or owner.get('user_id')}"
+                    f"({owner.get('user_id')})",
+                )
+            group_set = plugin._group_set_name(current_group, umo=_umo(event))
+            lines.append(f"所属群组：{group_set or '未加入任何群组'}")
+            results.append("\n".join(lines))
+        return _grouped(group_ids, results)
 
 
 @dataclass
@@ -1063,7 +1154,8 @@ class QqMemberListTool(_PluginTool):
             "properties": {
                 "group_id": {
                     "type": "string",
-                    "description": "目标群号。管理会话对应多个群时必填；群内触发或管理会话只对应一个群时可省略",
+                    "description": "目标群号。省略时作用于当前会话可管理的所有群；"
+                    "只填一个群号时仅作用于该群",
                 },
                 "limit": {
                     "type": "integer",
@@ -1085,36 +1177,40 @@ class QqMemberListTool(_PluginTool):
         Args:
             event: The tool call event.
             limit: Maximum number of members to include.
-            group_id: Target group number, needed only in a manage session
-                that corresponds to several groups.
+            group_id: Target group number; every group of the session is
+                used when it is omitted.
 
         Returns:
             The formatted listing or an ``error:`` string.
         """
         plugin = self.plugin
-        group_id = plugin._tool_group_id(event, group_id)
-        if not group_id:
-            return _no_group(plugin, event)
+        group_ids = plugin._tool_group_ids(event, group_id)
+        if not group_ids:
+            return _no_group(plugin, event, group_id)
 
         allowed, deny = await plugin._tool_permission(event, "query")
         if not allowed:
             return _denied(plugin, deny)
 
-        members = await plugin.client.get_group_member_list(event, group_id)
-        if not members:
-            return "error: 无法获取群成员列表"
-
         # ``or 50`` also covers a non-numeric or zero limit from the model.
         capped = max(1, min(_safe_int(limit) or 50, 200))
-        lines = [
-            f"{index}. {m.get('card') or m.get('nickname') or m.get('user_id')}"
-            f"({m.get('user_id')}) {_role_text(str(m.get('role') or ''))}"
-            for index, m in enumerate(members[:capped], start=1)
-        ]
-        header = f"群 {group_id} 共 {len(members)} 人"
-        if len(members) > capped:
-            header += f"，以下仅显示前 {capped} 条"
-        return header + "：\n" + "\n".join(lines)
+        results: list[str] = []
+        for current_group in group_ids:
+            members = await plugin.client.get_group_member_list(event, current_group)
+            if not members:
+                results.append("error: 无法获取群成员列表")
+                continue
+
+            lines = [
+                f"{index}. {m.get('card') or m.get('nickname') or m.get('user_id')}"
+                f"({m.get('user_id')}) {_role_text(str(m.get('role') or ''))}"
+                for index, m in enumerate(members[:capped], start=1)
+            ]
+            header = f"群 {current_group} 共 {len(members)} 人"
+            if len(members) > capped:
+                header += f"，以下仅显示前 {capped} 条"
+            results.append(header + "：\n" + "\n".join(lines))
+        return _grouped(group_ids, results)
 
 
 def _role_text(role: str) -> str:
