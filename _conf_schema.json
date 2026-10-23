@@ -2,18 +2,17 @@
   "enabled": {
     "type": "bool",
     "description": "启用插件",
-    "hint": "关闭后所有指令与 LLM 工具都不会响应",
+    "hint": "关闭后所有指令与 LLM 工具都不响应",
     "default": true
   },
   "llm_tool_options": {
     "type": "list",
     "description": "函数工具选项",
-    "hint": "选择暴露给 LLM 的工具。默认全部关闭：非内置工具默认不受权限门控，开启前请确认使用者可信，并建议在「扩展 → 组件」中设为 admin",
+    "hint": "默认全部关闭；非内置工具不受框架权限门控，开启前请确认使用者可信，并建议在「扩展 → 组件」中设为 admin",
     "options": [
       "qq_ban_member",
       "qq_whole_ban",
       "qq_kick_member",
-      "qq_recall_message",
       "qq_send_group_notice",
       "qq_group_notice_query",
       "qq_group_notice_delete",
@@ -28,7 +27,7 @@
   "group_sets": {
     "type": "template_list",
     "description": "群组定义",
-    "hint": "插件只对这里配置的群生效；未列入的群不会响应任何指令、自动审核与黑名单拦截。同一群号写在多个群组里时以先配置的为准",
+    "hint": "插件只对这里配置的群生效；同一群号写在多个群组里时以先配置的为准",
     "templates": {
       "group_set": {
         "name": "群组",
@@ -37,7 +36,7 @@
           "name": {
             "type": "string",
             "description": "群组名称",
-            "hint": "仅用于显示与黑名单分组：同名群组共享同一份黑名单，留空自动命名",
+            "hint": "仅用于显示与黑名单分组：同名群组共享黑名单，留空自动命名",
             "default": ""
           },
           "group_ids": {
@@ -46,19 +45,19 @@
               "type": "string"
             },
             "description": "群号列表",
-            "hint": "填群号（如 123456）会对所有平台实例生效；同时接了多个 QQ 时，可填该群的会话 UMO（如 aiocqhttp:GroupMessage:123456）把它绑定到其中一个实例，只有那个 QQ 的消息会被管理。同一群号不要出现在多个群组里",
+            "hint": "填群号（如 123456）对所有 QQ 实例生效；填会话 UMO（如 aiocqhttp:GroupMessage:123456，在目标群发 /sid 获取）则只对该实例生效",
             "default": []
           },
           "manage_session": {
             "type": "string",
             "description": "管理会话",
-            "hint": "群管理员专用的控制台会话 UMO，在目标会话发送 /sid 获取，例如 aiocqhttp:GroupMessage:123456。审核通知默认发到这里，里面的指令集与群内完全一致；指令不在目标群内执行时用 #群号 指明目标群（该管理会话只对应一个群时可省略）。留空则通知发到申请所在群，管理仍在各群内完成",
+            "hint": "群管理员控制台的会话 UMO（发 /sid 获取）。指令集与群内一致，需指定群时加 #群号；留空则通知发到申请所在群",
             "default": ""
           },
           "default_ban_duration": {
             "type": "string",
             "description": "默认禁言时长",
-            "hint": "未指定时长时使用；支持 600（秒）、10m、2h、1d 等写法",
+            "hint": "未指定时长时使用；支持 600、10m、2h、1d",
             "default": "10m"
           },
           "blacklist": {
@@ -68,25 +67,25 @@
               "enabled": {
                 "type": "bool",
                 "description": "启用黑名单",
-                "hint": "关闭后拉黑与查询会直接拒绝，撤回和审核拒绝同时失效；已有条目保留",
+                "hint": "关闭后拉黑与查询直接拒绝，撤回与审核拒绝同时失效；已有条目保留",
                 "default": true
               },
               "default_reason": {
                 "type": "string",
                 "description": "默认拉黑原因",
-                "hint": "指令或工具未提供原因时使用的文案",
+                "hint": "指令或工具未填原因时使用",
                 "default": "未填写原因"
               },
               "block_message": {
                 "type": "bool",
                 "description": "撤回黑名单成员的群消息",
-                "hint": "黑名单成员发言后立即撤回（需撤回权限）；不会阻止其他插件或模型处理该消息",
+                "hint": "成员发言后立即撤回（需撤回权限）；不影响其他插件或模型",
                 "default": false
               },
               "kick_on_add": {
                 "type": "string",
                 "description": "拉黑后踢出",
-                "hint": "none=不踢出；current=只把目标移出执行拉黑的这个群；all=移出该群组里的所有群（跨实例时会走对应实例执行）",
+                "hint": "none=不踢；current=只踢执行拉黑的群；all=踢该群组所有群",
                 "options": [
                   "none",
                   "current",
@@ -95,30 +94,30 @@
                 "default": "none"
               }
             },
-            "hint": "组内所有群共享同一份黑名单；拉黑是永久的，需要时用「解除拉黑」移出"
+            "hint": "组内所有群共享；拉黑永久有效，用「解除拉黑」移出"
           },
           "join_review": {
             "type": "object",
             "description": "自动进群审核",
-            "hint": "本群组的通用规则，对组内所有群生效；未加入群组的群不会自动审核",
+            "hint": "本群组通用规则，对组内所有群生效",
             "items": {
               "enabled": {
                 "type": "bool",
                 "description": "启用进群审核",
                 "default": false,
-                "hint": "开启后按下面的规则自动处理新申请；关闭则完全不自动处理"
+                "hint": "开启后按下列规则自动处理新申请"
               },
               "blacklist_reject": {
                 "type": "bool",
                 "description": "黑名单成员自动拒绝",
-                "hint": "申请人处于本群组黑名单中时直接拒绝（需启用黑名单）",
+                "hint": "申请人在本群组黑名单中时直接拒绝（需启用黑名单）",
                 "default": true
               },
               "keyword_allow": {
                 "type": "bool",
                 "description": "答案匹配关键词时自动放行",
                 "default": true,
-                "hint": "关闭后命中关键词也不会自动放行"
+                "hint": "关闭后命中关键词也不放行"
               },
               "keywords": {
                 "type": "list",
@@ -126,7 +125,7 @@
                   "type": "string"
                 },
                 "description": "放行关键词",
-                "hint": "直接填写对所有群生效；写成「群号:关键词」只对该群生效，例如 123456:答案",
+                "hint": "直接填写全群组生效；写成「群号:关键词」只对该群生效",
                 "default": []
               },
               "question_type": {
@@ -143,13 +142,13 @@
               "min_account_level": {
                 "type": "int",
                 "description": "最低 QQ 等级",
-                "hint": "0 表示不检查；需协议端支持 level 字段，不支持时跳过并警告",
+                "hint": "0 表示不检查；需协议端支持 level 字段",
                 "default": 0
               },
               "default_action": {
                 "type": "string",
                 "description": "默认行为",
-                "hint": "未命中黑名单、跨群免审核与关键词时：hold=保持待审（安静进入待办，需要有人在别处引用通知才能处理），approve=直接放行，reject=直接拒绝；发不发通知由「通知与回执」的「进群审核通知发送到」决定",
+                "hint": "hold=保持待审（安静入队，需引用通知处理）；approve=放行；reject=拒绝。是否发通知由「通知与回执」决定",
                 "options": [
                   "hold",
                   "approve",
@@ -162,7 +161,7 @@
                 "type": "string",
                 "description": "拒绝理由",
                 "default": "未通过进群审核",
-                "hint": "拒绝申请时展示给申请人；留空使用默认文案"
+                "hint": "拒绝时展示给申请人；留空用默认文案"
               },
               "exemptions": {
                 "type": "list",
@@ -170,7 +169,7 @@
                   "type": "string"
                 },
                 "description": "跨群免审核",
-                "hint": "直接填来源群号（逗号分隔）对所有群生效；写成「目标群:来源群1,来源群2」只对该目标群生效。命中后直接通过，黑名单优先",
+                "hint": "填来源群号（逗号分隔）对所有群生效；写「目标群:来源群」只对该目标群生效",
                 "default": []
               }
             }
@@ -189,19 +188,19 @@
           "type": "string"
         },
         "description": "自定义用户白名单",
-        "hint": "这些 QQ 号拥有等同 AstrBot 管理员的权限，可使用全部指令",
+        "hint": "等同 AstrBot 管理员，可使用全部指令",
         "default": []
       },
       "allow_astrbot_admin": {
         "type": "bool",
         "description": "允许 AstrBot 全局管理员",
-        "hint": "AstrBot 配置里的 admins_id 列表",
+        "hint": "AstrBot 配置中的 admins_id",
         "default": true
       },
       "allow_group_admin": {
         "type": "bool",
         "description": "允许群主与群管理员",
-        "hint": "按 OneBot 返回的 owner / admin 角色判定",
+        "hint": "按 OneBot 的 owner / admin 角色判定",
         "default": true
       },
       "allow_member_command": {
@@ -315,7 +314,7 @@
             ]
           }
         },
-        "hint": "any=任何人，group_admin=群主或群管理员，astrbot_admin=仅 AstrBot 管理员与白名单用户"
+        "hint": "any=任何人；group_admin=群主或群管理员；astrbot_admin=仅 AstrBot 管理员与白名单"
       }
     },
     "hint": "指令默认允许 AstrBot 管理员、白名单用户与群主/群管理员使用，查询类指令默认也允许普通成员"
@@ -328,7 +327,7 @@
         "type": "bool",
         "description": "启用二次确认",
         "default": true,
-        "hint": "关闭后踢人与全群禁言不再询问，直接执行"
+        "hint": "关闭后踢人与全群禁言直接执行"
       },
       "timeout": {
         "type": "int",
@@ -339,7 +338,7 @@
       "require_for": {
         "type": "list",
         "description": "需要确认的操作",
-        "hint": "whole_ban 指「禁言 全体」，kick 指踢人",
+        "hint": "whole_ban=「禁言 全体」，kick=踢人",
         "options": [
           "kick",
           "whole_ban"
@@ -368,7 +367,7 @@
           "type": "string"
         },
         "description": "取消词",
-        "hint": "同时用于进群审核通知的「拒绝」回复",
+        "hint": "进群审核通知的「拒绝」回复也用这里",
         "default": [
           "取消",
           "拒绝",
@@ -392,7 +391,7 @@
       "max_members": {
         "type": "int",
         "description": "成员名单导出行数上限",
-        "hint": "每个群的成员导出上限，超出部分会被截断并在表格中标注",
+        "hint": "每个群的上限，超出部分截断并在表格中标注",
         "default": 3000
       },
       "cleanup_hours": {
@@ -412,7 +411,7 @@
       "receipt_to_manage_session": {
         "type": "list",
         "description": "回执额外发到管理会话",
-        "hint": "勾选的内容在答复执行会话的同时，再转发一份到该群组的管理会话（在管理会话里执行的指令不会重复发）。禁言=含解禁与全群禁言；踢人=/踢；撤回=/撤回；黑名单=/拉黑、/解除拉黑及拉黑后自动踢出；导出=/导出",
+        "hint": "勾选的内容在答复执行会话之外，再发一份到管理会话（在管理会话执行时不重复发）",
         "options": [
           "禁言",
           "踢人",
@@ -425,7 +424,7 @@
       "review_notice_target": {
         "type": "string",
         "description": "进群审核通知发送到",
-        "hint": "新进群申请、自动放行/拒绝、保持待审提示，以及引用通知处理后的回执都发到：origin=申请所在的群；manage=管理会话（未配置时改发申请所在群，默认）；both=两者都发；none=不发，申请安静地进入待办队列",
+        "hint": "origin=申请所在群；manage=管理会话（未配置时回退申请所在群）；both=都发；none=不发。新申请与处理结果都跟随此处",
         "options": [
           "origin",
           "manage",
@@ -444,7 +443,7 @@
       "enabled": {
         "type": "bool",
         "description": "记录审计日志",
-        "hint": "记录到插件数据目录下的 audit.jsonl",
+        "hint": "写入插件数据目录的 audit.jsonl",
         "default": true
       },
       "retention_days": {
@@ -464,225 +463,236 @@
       "ban_success": {
         "type": "text",
         "description": "禁言成功",
-        "hint": "可用占位符：{target_name} {target_id} {duration}",
+        "hint": "占位符：{target_name} {target_id} {duration}",
         "default": "已禁言 {target_name}({target_id}) {duration}"
       },
       "unban_success": {
         "type": "text",
         "description": "解禁成功",
-        "hint": "可用占位符：{target_name} {target_id}",
+        "hint": "占位符：{target_name} {target_id}",
         "default": "已解除 {target_name}({target_id}) 的禁言"
       },
       "whole_ban_on": {
         "type": "text",
         "description": "全群禁言已开启",
-        "default": "已开启全群禁言"
+        "default": "已开启全群禁言",
+        "hint": ""
       },
       "whole_ban_off": {
         "type": "text",
         "description": "全群禁言已解除",
-        "default": "已解除全群禁言"
+        "default": "已解除全群禁言",
+        "hint": ""
       },
       "whole_ban_timed": {
         "type": "text",
         "description": "全群禁言已开启（定时）",
-        "hint": "可用占位符：{duration}",
+        "hint": "占位符：{duration}",
         "default": "已开启全群禁言，将在 {duration} 后自动解除"
       },
       "kick_success": {
         "type": "text",
         "description": "踢人成功",
-        "hint": "可用占位符：{target_name} {target_id}",
+        "hint": "占位符：{target_name} {target_id}",
         "default": "已将 {target_name}({target_id}) 移出本群"
       },
       "recall_success": {
         "type": "text",
         "description": "撤回成功",
-        "default": "已撤回指定消息"
+        "default": "已撤回指定消息",
+        "hint": ""
       },
       "notice_success": {
         "type": "text",
         "description": "群公告发送成功",
-        "default": "群公告已更新"
+        "default": "群公告已更新",
+        "hint": ""
       },
       "no_permission": {
         "type": "text",
         "description": "权限不足",
-        "hint": "可用占位符：{reason}",
+        "hint": "占位符：{reason}",
         "default": "你没有权限执行该操作：{reason}"
       },
       "no_target": {
         "type": "text",
         "description": "未指定目标",
-        "default": "请 @ 一个目标，或回复对方的消息后再执行本指令"
+        "default": "请 @ 一个目标、引用对方消息，或直接填写 QQ 号",
+        "hint": ""
       },
       "blacklist_added": {
         "type": "text",
         "description": "拉黑成功",
-        "hint": "可用占位符：{target_name} {target_id} {reason}",
+        "hint": "占位符：{target_name} {target_id} {reason}",
         "default": "已将 {target_name}({target_id}) 加入黑名单\n原因：{reason}"
       },
       "blacklist_removed": {
         "type": "text",
         "description": "移出黑名单",
-        "hint": "可用占位符：{target_name} {target_id}",
+        "hint": "占位符：{target_name} {target_id}",
         "default": "已将 {target_name}({target_id}) 移出黑名单"
       },
       "blacklist_not_found": {
         "type": "text",
         "description": "目标不在黑名单",
-        "hint": "可用占位符：{target_name} {target_id}",
+        "hint": "占位符：{target_name} {target_id}",
         "default": "{target_name}({target_id}) 不在黑名单中"
       },
       "blacklist_empty": {
         "type": "text",
         "description": "黑名单为空",
-        "hint": "群组没有黑名单条目时显示；可用占位符：{scope}",
+        "hint": "占位符：{scope}",
         "default": "黑名单（{scope}）当前为空"
       },
       "blacklist_disabled": {
         "type": "text",
         "description": "黑名单功能已关闭",
-        "hint": "群组关闭黑名单后，拉黑与解除拉黑返回的提示",
-        "default": "黑名单功能已在插件配置中关闭"
+        "hint": "",
+        "default": "黑名单已在插件配置中关闭"
       },
       "blacklist_header": {
         "type": "text",
         "description": "黑名单列表头部",
-        "hint": "可用占位符：{scope} {count} {groups}",
+        "hint": "占位符：{scope} {count} {groups}",
         "default": "黑名单（{scope}）共 {count} 人，覆盖 {groups} 个群"
       },
       "bad_duration": {
         "type": "text",
         "description": "时长格式错误",
-        "default": "时长格式不正确，示例：10m、2h、1d、600"
+        "default": "时长格式不正确，示例：10m、2h、1d、600",
+        "hint": ""
       },
       "api_failed": {
         "type": "text",
         "description": "接口调用失败",
-        "hint": "可用占位符：{error}",
+        "hint": "占位符：{error}",
         "default": "操作失败：{error}"
       },
       "api_unsupported": {
         "type": "text",
         "description": "协议端不支持该接口",
-        "default": "当前协议端不支持该操作，建议改用 NapCat 或 Lagrange"
+        "default": "当前协议端不支持该操作（建议 NapCat 或 Lagrange）",
+        "hint": ""
       },
       "confirm_prompt": {
         "type": "text",
         "description": "二次确认提示",
-        "hint": "可用占位符：{summary} {timeout}",
-        "default": "即将执行：{summary}\n回复「同意」继续，回复「取消」放弃（{timeout} 秒内有效）"
+        "hint": "占位符：{summary} {timeout}",
+        "default": "即将执行：{summary}\n回复「同意」继续，「取消」放弃（{timeout} 秒内有效）"
       },
       "confirm_timeout": {
         "type": "text",
         "description": "确认超时",
-        "default": "操作已取消（等待确认超时）"
+        "default": "操作已取消（等待确认超时）",
+        "hint": ""
       },
       "confirm_cancelled": {
         "type": "text",
         "description": "操作已取消",
-        "default": "操作已取消"
+        "default": "操作已取消",
+        "hint": ""
       },
       "confirm_not_operator": {
         "type": "text",
         "description": "非操作者尝试确认",
-        "default": "只有发起该操作的人可以确认"
+        "default": "只有发起该操作的人可以确认",
+        "hint": ""
       },
       "review_new_request": {
         "type": "text",
         "description": "进群申请通知",
-        "hint": "可用占位符：{group_id} {user_id} {user_name} {comment} {sub_type} {decision} {reason}",
+        "hint": "占位符：{group_id} {user_id} {user_name} {comment} {sub_type} {decision} {reason}",
         "default": "【进群申请】群 {group_id}\n申请人：{user_id}\n答案：{comment}\n处理：{decision}（{reason}）"
       },
       "review_decided": {
         "type": "text",
         "description": "人工审核完成",
-        "hint": "可用占位符：{action} {user_id} {group_id}",
+        "hint": "占位符：{action} {user_id} {group_id}",
         "default": "已{action} {user_id} 加入群 {group_id} 的申请"
       },
       "review_pending_hint": {
         "type": "text",
         "description": "待审通知的回复提示",
-        "hint": "贴在「保持待审」的通知末尾，提示引用该消息回复",
+        "hint": "贴在「保持待审」通知末尾",
         "default": "引用本条消息回复「同意」或「拒绝」即可处理"
       },
       "group_not_found": {
         "type": "text",
         "description": "找不到指定群组",
-        "hint": "可用占位符：{selector}",
+        "hint": "占位符：{selector}",
         "default": "未找到群组：{selector}"
       },
       "member_list_failed": {
         "type": "text",
         "description": "获取群成员失败",
         "default": "无法获取群成员列表，请稍后重试",
-        "hint": "导出群成员但取不到成员列表时回复"
+        "hint": ""
       },
       "export_success": {
         "type": "text",
         "description": "导出并上传成功",
-        "hint": "可用占位符：{kind} {count}；成员名单会按群分表",
+        "hint": "占位符：{kind} {count}",
         "default": "已导出{kind}表格（{count} 条）并上传到群文件"
       },
       "export_local_only": {
         "type": "text",
         "description": "导出成功但上传失败",
-        "hint": "可用占位符：{kind} {count} {path}",
-        "default": "已生成{kind}表格（{count} 条），但上传失败。\n本地路径：{path}"
+        "hint": "占位符：{kind} {count} {path}",
+        "default": "已生成{kind}表格（{count} 条），上传失败。\n本地路径：{path}"
       },
       "export_empty": {
         "type": "text",
         "description": "无可导出数据",
-        "hint": "可用占位符：{kind}",
+        "hint": "占位符：{kind}",
         "default": "{kind}为空，没有可导出的数据"
       },
       "export_failed": {
         "type": "text",
         "description": "导出失败",
-        "hint": "可用占位符：{error}",
+        "hint": "占位符：{error}",
         "default": "导出失败：{error}"
       },
       "review_reply_ambiguous": {
         "type": "text",
         "description": "多条待办时要求引用",
-        "hint": "可用占位符：{count}",
-        "default": "当前有 {count} 条待处理申请，请引用对应的通知消息后再回复同意/拒绝"
+        "hint": "占位符：{count}",
+        "default": "有 {count} 条待处理申请，请引用对应通知后再回复同意/拒绝"
       },
       "usage": {
         "type": "text",
         "description": "参数用法提示",
-        "hint": "可用占位符：{usage}",
-        "default": "用法：{usage}（目标支持 @某人、回复对方消息或直接填写 QQ 号）"
+        "hint": "占位符：{usage}",
+        "default": "用法：{usage}（目标可 @、引用或直接填 QQ 号）"
       },
       "group_required": {
         "type": "text",
         "description": "需要指定目标群",
-        "hint": "可用占位符：{groups}",
-        "default": "该会话对应多个群，请在指令中用 #群号 指定目标群，例如：禁言 #123456 @某人；可用：{groups}"
+        "hint": "占位符：{groups}",
+        "default": "请用 #群号 指定目标群（可选：{groups}），例如：禁言 #123456 @某人"
       },
       "kick_failed_in": {
         "type": "text",
         "description": "拉黑自动踢出失败",
-        "hint": "可用占位符：{group}",
+        "hint": "占位符：{group}",
         "default": "未能将目标移出群 {group}"
       },
       "blacklist_disabled_full": {
         "type": "text",
         "description": "群组黑名单已关闭",
-        "hint": "在管理会话里逐个群组汇报时使用；可用占位符：{scope}",
-        "default": "黑名单（{scope}）：已在插件配置中关闭"
+        "hint": "占位符：{scope}",
+        "default": "黑名单（{scope}）：已在配置中关闭"
       },
       "blacklist_scopes": {
         "type": "text",
         "description": "拉黑生效范围",
-        "hint": "管理会话同时管理多个群组时追加的一行；可用占位符：{scopes}",
+        "hint": "管理会话管理多个群组时追加；占位符：{scopes}",
         "default": "生效群组：{scopes}"
       },
       "notice_deleted": {
         "type": "text",
         "description": "群公告删除成功",
-        "default": "群公告已删除"
+        "default": "群公告已删除",
+        "hint": ""
       }
     }
   }
