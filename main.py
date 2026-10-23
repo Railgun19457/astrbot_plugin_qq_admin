@@ -2843,7 +2843,8 @@ class QQAdminPlugin(Star):
         """Resolve the group a tool call operates on.
 
         The group id is never a tool parameter; it always comes from the event,
-        so a model cannot be steered into touching another group.
+        or from a management session that controls exactly one group, so a
+        model cannot be steered into touching another group.
 
         Args:
             event: The tool call event.
@@ -2857,7 +2858,17 @@ class QQAdminPlugin(Star):
         if event.get_platform_name() != SUPPORTED_PLATFORM:
             return ""
         group_id = str(event.get_group_id() or "")
-        return group_id if self._group_set_for(event) is not None else ""
+        if self._group_set_for(event) is not None:
+            return group_id
+
+        managed_group_ids = {
+            group_id
+            for group_set in self._manage_sets(event)
+            for group_id in group_set["group_ids"]
+        }
+        if len(managed_group_ids) == 1:
+            return next(iter(managed_group_ids))
+        return ""
 
     def _extract_targets(self, event: AstrMessageEvent) -> list[str]:
         """Extract ``@`` targets from an event.

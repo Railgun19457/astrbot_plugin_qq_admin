@@ -710,7 +710,7 @@ class QqBlacklistAddTool(_PluginTool):
     name: str = "qq_blacklist_add"
     description: str = (
         "将成员永久加入本群组的共享黑名单。reason 是必填的拉黑原因，会记录并出现在导出表格中。"
-        "拉黑不会自动解除，需要时用 qq_blacklist_remove 移出。"
+        "拉黑不会自动解除，也不会自动踢出成员；需要时用 qq_blacklist_remove 移出。"
     )
     parameters: dict = field(
         default_factory=lambda: {
@@ -783,24 +783,7 @@ class QqBlacklistAddTool(_PluginTool):
             target_id=target,
             reason=final_reason,
         )
-        kick_mode = str(blacklist_policy["kick_on_add"] or "none")
-        if kick_mode == "none":
-            return text
-
-        lines = await plugin._auto_kick_after_blacklist(
-            event,
-            group_set=plugin._group_set_for(event),
-            group_id=group_id,
-            user_id=target,
-            nickname=name,
-            reason=final_reason,
-            mode=kick_mode,
-            operator=str(event.get_sender_id() or ""),
-            via="llm_tool",
-        )
-        if not lines:
-            return text
-        return text + "\n" + "\n".join(lines)
+        return text
 
 
 @dataclass
